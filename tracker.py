@@ -1,0 +1,63 @@
+import os
+import requests
+from supabase import create_client, Client
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
+PRODUCT_JSON_URL = "https://www.ascolour.com.au/wos-maple-tee-4001.json" 
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def send_alert(message: str):
+    if DISCORD_WEBHOOK_URL:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+
+def process_inventory():
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(PRODUCT_JSON_URL, headers=headers)
+    if response.status_code != 200:
+        print(f"Failed to fetch inventory. Status code: {response.status_code}")
+        return
+
+    data = response.json()
+    variants = data.get("product", {}).get("variants", []) if "product" in data else data.get("variants", [])
+
+    for variant in variants:
+        variant_id = str(variant.get("id"))
+        colour = variant.get("option1", "Unknown")
+        size = variant.get("option2", "Unknown")
+        stock = int(variant.get("inventory_quantity", 0))
+
+        is_below_25 = stock < 25
+
+        res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
+        existing_records = res.data
+
+        if not existing_records:
+            supabase.table("inventory_states").insert({
+                "variant_id": variant_id,
+                "colour_name": colour,
+                "size_name": size,
+                "stock_count": stock,
+                "is_below_25": is_below_25
+            }).execute()
+            continue
+
+        prev_state = existing_records[0]
+        prev_is_below_25 = prev_state["is_below_25"]
+
+        if not prev_is_below_25 and is_below_25:
+            send_alert(f"⚠️ **LOW STOCK**: Wo's Maple Tee ({colour} / {size}) dropped below 25! Current stock: **{stock}**")
+        elif prev_is_below_25 and not is_below_25:
+            send_alert(f"✅ **RESTOCK**: Wo's Maple Tee ({colour} / {size}) went above 25! Current stock: **{stock}**")
+
+        supabase.table("inventory_states").update({
+            "stock_count": stock,
+            "is_below_25": is_below_25,
+            "updated_at": "now()"
+        }).eq("variant_id", variant_id).execute()
+
+if __name__ == "__main__":
+    process_inventory()
