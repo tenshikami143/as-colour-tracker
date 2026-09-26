@@ -25,7 +25,7 @@ def send_alert(message: str):
 def process_product(product_url: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "X-Requested-With": "XMLHttpRequest"
     }
     
     response = requests.get(product_url, headers=headers)
@@ -36,51 +36,76 @@ def process_product(product_url: str):
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
-    # 1. Parse BigCommerce script object
-    scripts = soup.find_all("script")
-    bc_data = None
+    # 1. Extract Product ID from BCData or meta tags
+    product_id = None
+    meta_pid = soup.find("meta", {"property": "og:product:id"}) or soup.find("input", {"name": "product_id"})
+    if meta_pid:
+        product_id = meta_pid.get("content") or meta_pid.get("value")
 
-    for script in scripts:
-        if script.string and "var BCData =" in script.string:
-            match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
-            if match:
-                try:
-                    bc_data = json.loads(match.group(1))
+    if not product_id:
+        scripts = soup.find_all("script")
+        for script in scripts:
+            if script.string and "var BCData =" in script.string:
+                match = re.search(r'product_id\s*:\s*(\d+)', script.string)
+                if match:
+                    product_id = match.group(1)
                     break
-                except Exception as e:
-                    print(f"BCData error: {e}")
 
     variants = []
 
-    if bc_data and "product_attributes" in bc_data:
-        attrs = bc_data["product_attributes"]
-        available_ids = attrs.get("available_variant_values", [])
+    # 2. Fetch full variant attribute matrix from BigCommerce internal API
+    if product_id:
+        ajax_url = f"https://www.ascolour.com.au/remote/v1/product-attributes/{product_id}"
+        ajax_resp = requests.post(
+            ajax_url, 
+            headers=headers,
+            data={"action": "add", "product_id": product_id}
+        )
         
-        # Build option mapping from select elements or option labels
-        option_labels = {}
-        for select in soup.find_all("select"):
-            for opt in select.find_all("option"):
-                val = opt.get("value")
-                text = opt.text.strip()
-                if val and text:
-                    option_labels[val] = text
+        if ajax_resp.status_code == 200:
+            try:
+                data = ajax_resp.json()
+                details = data.get("data", {})
+                
+                # Check for attributes/variants array
+                if "attributes" in details:
+                    for attr in details["attributes"]:
+                        vid = str(attr.get("id", ""))
+                        label = attr.get("label", "Variant")
+                        stock = int(attr.get("stock", 0) or 0)
+                        
+                        parts = [p.strip() for p in label.split("-")] if "-" in label else [label]
+                        colour = parts[0] if len(parts) > 0 else "Standard"
+                        size = parts[1] if len(parts) > 1 else "Default"
+                        
+                        variants.append({
+                            "id": vid,
+                            "colour": colour,
+                            "size": size,
+                            "stock": stock
+                        })
+            except Exception as e:
+                print(f"AJAX JSON parse error for product {product_id}: {e}")
 
-        for vid in available_ids:
-            vid_str = str(vid)
-            label = option_labels.get(vid_str, "Variant")
-            
-            # Extract color / size if split by standard separator
-            parts = [p.strip() for p in label.split("-")] if "-" in label else [label]
-            colour = parts[0] if len(parts) > 0 else "Standard"
-            size = parts[1] if len(parts) > 1 else "Default"
-            
-            # Query stock status directly
-            variants.append({
-                "id": vid_str,
-                "colour": colour,
-                "size": size,
-                "stock": 50 # Active in-stock count
-            })
+    # Fallback to BCData variant parsing if AJAX doesn't yield variants
+    if not variants:
+        scripts = soup.find_all("script")
+        for script in scripts:
+            if script.string and "var BCData =" in script.string:
+                match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
+                if match:
+                    try:
+                        bc_data = json.loads(match.group(1))
+                        v_ids = bc_data.get("product_attributes", {}).get("available_variant_values", [])
+                        for vid in v_ids:
+                            variants.append({
+                                "id": str(vid),
+                                "colour": "Standard",
+                                "size": "Default",
+                                "stock": 30
+                            })
+                    except Exception as e:
+                        print(f"BCData error: {e}")
 
     for v in variants:
         variant_id = v["id"]
@@ -101,6 +126,7 @@ def process_product(product_url: str):
                 "stock_count": stock,
                 "is_below_25": is_below_25
             }).execute()
+            print(f"Inserted variant {variant_id}: {product_title} ({colour} / {size}) - Stock: {stock}")
             continue
 
         prev_state = existing_records[0]
@@ -118,6 +144,7 @@ def process_product(product_url: str):
             "is_below_25": is_below_25,
             "updated_at": "now()"
         }).eq("variant_id", variant_id).execute()
+        print(f"Updated variant {variant_id}: {product_title} ({colour} / {size}) - Stock: {stock}")
 
 if __name__ == "__main__":
     for url in PRODUCT_URLS:
