@@ -8,7 +8,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN", "")
 
-# Define target style codes (e.g., 5026 for Classic Tee)
+# Define target style codes
 PRODUCT_STYLES = [
     {"code": "5026", "title": "Classic Tee 5026"},
     {"code": "5001", "title": "Staple Tee 5001"},
@@ -28,12 +28,12 @@ def send_alert(message: str):
 def fetch_product_inventory(style_code: str):
     graphql_url = "https://www.ascolour.com.au/graphql"
     
-    # Storefront GraphQL query to pull exact variant inventory levels
+    # Storefront GraphQL query with corrected singular searchTerm filter
     query = """
     query getProductInventory($searchTerm: String!) {
       site {
         search {
-          searchProducts(filters: { searchTerms: $searchTerm }) {
+          searchProducts(filters: { searchTerm: $searchTerm }) {
             products {
               edges {
                 node {
@@ -122,7 +122,7 @@ def fetch_product_inventory(style_code: str):
             if inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
             elif inv.get("isInStock"):
-                stock_qty = 100  # Default baseline if exact number is omitted
+                stock_qty = 100  # Baseline default if exact integer is masked
 
             # Parse color and size labels from options
             color_name = "DEFAULT"
