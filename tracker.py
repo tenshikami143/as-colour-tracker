@@ -9,15 +9,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # --- ADD YOUR AS COLOUR PRODUCT URLS HERE ---
 PRODUCT_URLS = [
     "https://www.ascolour.com.au/wos-maple-tee-4001.json",
-    # Add extra products below by pasting their URL with .json at the end:
     "https://www.ascolour.com.au/staple-tee-5001.json",
     "https://www.ascolour.com.au/stencil-hood-5102.json",
     "https://www.ascolour.com.au/classic-tee-5026.json",
-
-
-
-
-    
 ]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -27,7 +21,12 @@ def send_alert(message: str):
         requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
 
 def process_product(product_url: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
+    # Standard Chrome browser user-agent to bypass basic scraping blocks
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    
     response = requests.get(product_url, headers=headers)
     if response.status_code != 200:
         print(f"Failed to fetch {product_url}. Status code: {response.status_code}")
@@ -35,7 +34,6 @@ def process_product(product_url: str):
 
     data = response.json()
     
-    # Get product title for clearer notifications
     product_title = data.get("product", {}).get("title") if "product" in data else data.get("title", "Product")
     variants = data.get("product", {}).get("variants", []) if "product" in data else data.get("variants", [])
 
