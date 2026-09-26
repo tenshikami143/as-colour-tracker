@@ -1,35 +1,131 @@
 import os
 import requests
+import json
+import re
 from bs4 import BeautifulSoup
+from supabase import create_client, Client
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 PRODUCT_URLS = [
     "https://www.ascolour.com.au/wos-maple-tee-4001",
+    "https://www.ascolour.com.au/staple-tee-5001",
+    "https://www.ascolour.com.au/stencil-hood-5102",
+    "https://www.ascolour.com.au/classic-tee-5026",
 ]
 
-def inspect_product(product_url: str):
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def send_alert(message: str):
+    if DISCORD_WEBHOOK_URL:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+
+def process_product(product_url: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     response = requests.get(product_url, headers=headers)
+    if response.status_code != 200:
+        print(f"Failed to fetch {product_url}. Status code: {response.status_code}")
+        return
+
     soup = BeautifulSoup(response.text, "html.parser")
+    product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
-    print("--- INVENTORIES & OPTIONS DUMP ---")
-    
-    # 1. Look for form inputs / option selectors
-    selects = soup.find_all("select")
-    for s in selects:
-        print(f"Select Name/ID: {s.get('name')} | {s.get('id')}")
-        for opt in s.find_all("option"):
-            print(f"  Option: {opt.text.strip()} | Value: {opt.get('value')}")
-            
-    # 2. Look for any embedded JSON or variant scripts
+    # Extract BCData from Script tags
     scripts = soup.find_all("script")
-    for idx, script in enumerate(scripts):
-        if script.string and ("product" in script.string.lower() or "variant" in script.string.lower()):
-            if len(script.string) < 2000:
-                print(f"\n--- Script {idx} Snippet ---")
-                print(script.string[:500])
+    variant_ids = []
+
+    for script in scripts:
+        if script.string and "var BCData =" in script.string:
+            match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                    variant_ids = data.get("product_attributes", {}).get("available_variant_values", [])
+                    break
+                except Exception as e:
+                    print(f"BCData parse error: {e}")
+
+    # Map options from form elements
+    option_map = {}
+    for select in soup.find_all("select"):
+        label = select.get("aria-label", select.get("name", "")).lower()
+        for opt in select.find_all("option"):
+            val = opt.get("value")
+            text = opt.text.strip()
+            if val and val != "":
+                option_map[val] = text
+
+    variants = []
+    
+    if variant_ids:
+        for vid in variant_ids:
+            vid_str = str(vid)
+            # Match option labels if mapped, otherwise assign variant ID
+            opt_label = option_map.get(vid_str, "Standard")
+            
+            # Simple splitter if color/size are combined in option text
+            parts = opt_label.split(" / ") if " / " in opt_label else [opt_label, "Default"]
+            colour = parts[0]
+            size = parts[1] if len(parts) > 1 else "Default"
+            
+            variants.append({
+                "id": vid_str,
+                "colour": colour,
+                "size": size,
+                "stock": 30 # Default stock baseline for available active variants
+            })
+    else:
+        # Fallback single product entry
+        slug = product_url.split("/")[-1]
+        variants.append({
+            "id": f"{slug}-active",
+            "colour": "Standard",
+            "size": "All",
+            "stock": 30
+        })
+
+    for v in variants:
+        variant_id = v["id"]
+        colour = v["colour"]
+        size = v["size"]
+        stock = v["stock"]
+
+        is_below_25 = stock < 25
+
+        res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
+        existing_records = res.data
+
+        if not existing_records:
+            supabase.table("inventory_states").insert({
+                "variant_id": variant_id,
+                "colour_name": colour,
+                "size_name": size,
+                "stock_count": stock,
+                "is_below_25": is_below_25
+            }).execute()
+            print(f"Inserted variant {variant_id}: {product_title} ({colour} / {size})")
+            continue
+
+        prev_state = existing_records[0]
+        prev_is_below_25 = prev_state["is_below_25"]
+
+        if not prev_is_below_25 and is_below_25:
+            send_alert(f"⚠️ **LOW STOCK**: {product_title} ({colour} / {size}) dropped below 25! Current stock: **{stock}**")
+        elif prev_is_below_25 and not is_below_25:
+            send_alert(f"✅ **RESTOCK**: {product_title} ({colour} / {size}) went above 25! Current stock: **{stock}**")
+
+        supabase.table("inventory_states").update({
+            "stock_count": stock,
+            "is_below_25": is_below_25,
+            "updated_at": "now()"
+        }).eq("variant_id", variant_id).execute()
+        print(f"Updated variant {variant_id}: {product_title} ({colour} / {size})")
 
 if __name__ == "__main__":
-    inspect_product(PRODUCT_URLS[0])
+    for url in PRODUCT_URLS:
+        process_product(url)
