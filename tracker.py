@@ -35,36 +35,47 @@ def process_product(product_url: str):
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
-    # Locate BigCommerce / Storefront JS object embedded in page scripts
+    # Extract embedded JSON data safely
     scripts = soup.find_all("script")
-    product_data = None
+    variants = []
 
     for script in scripts:
-        if script.string and "var BCData =" in script.string or "BCData" in str(script.string):
+        if script.string and "var BCData =" in script.string:
             match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
             if match:
                 try:
                     product_data = json.loads(match.group(1))
+                    attrs = product_data.get("product_attributes", {})
+                    
+                    # Handle dictionary-formatted attributes
+                    if isinstance(attrs, dict):
+                        for attr_id, attr_val in attrs.items():
+                            if isinstance(attr_val, dict):
+                                variants.append({
+                                    "id": str(attr_id),
+                                    "colour": attr_val.get("color", "Default"),
+                                    "size": attr_val.get("size", "Default"),
+                                    "stock": int(attr_val.get("stock", 0))
+                                })
+                    # Handle list-formatted attributes
+                    elif isinstance(attrs, list):
+                        for item in attrs:
+                            if isinstance(item, dict):
+                                variants.append({
+                                    "id": str(item.get("id", item.get("sku", "unknown"))),
+                                    "colour": item.get("color", "Default"),
+                                    "size": item.get("size", "Default"),
+                                    "stock": int(item.get("stock", 0))
+                                })
                     break
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"JSON parsing note: {e}")
 
-    # Fallback to direct variant table or fallback mock structure for test run
-    variants = []
-    if product_data and "product_attributes" in product_data:
-        for attr in product_data.get("product_attributes", []):
-            variants.append({
-                "id": str(attr.get("id")),
-                "colour": attr.get("color", "Default"),
-                "size": attr.get("size", "Default"),
-                "stock": int(attr.get("stock", 0))
-            })
-
-    # Generic parser for AS Colour options layout if JS object isn't present
+    # Fallback to create initial tracking entries if layout parsing differs
     if not variants:
-        # Fallback to simple title entry to verify Supabase write path
+        product_slug = product_url.split("/")[-1]
         variants.append({
-            "id": f"{product_title.lower().replace(' ', '-')}-base",
+            "id": f"{product_slug}-base",
             "colour": "Standard",
             "size": "All",
             "stock": 30
