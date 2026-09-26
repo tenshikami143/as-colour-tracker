@@ -6,8 +6,9 @@ from supabase import create_client, Client
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN", "")
 
-# Define target style codes (e.g. 5026 for Classic Tee)
+# Define target style codes (e.g., 5026 for Classic Tee)
 PRODUCT_STYLES = [
     {"code": "5026", "title": "Classic Tee 5026"},
     {"code": "5001", "title": "Staple Tee 5001"},
@@ -19,7 +20,10 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def send_alert(message: str):
     if DISCORD_WEBHOOK_URL:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+        except Exception as e:
+            print(f"Failed to send Discord alert: {e}")
 
 def fetch_product_inventory(style_code: str):
     graphql_url = "https://www.ascolour.com.au/graphql"
@@ -76,6 +80,7 @@ def fetch_product_inventory(style_code: str):
     headers = {
         "Content-Type": "application/json",
         "X-Bc-Store-Id": "1001021066",
+        "Authorization": ASCOLOUR_GRAPHQL_TOKEN,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
@@ -86,11 +91,18 @@ def fetch_product_inventory(style_code: str):
 
     try:
         response = requests.post(graphql_url, json=payload, headers=headers, timeout=15)
+        
         if response.status_code != 200:
-            print(f"GraphQL request failed for {style_code}: Status {response.status_code}")
+            print(f"GraphQL request failed for style {style_code}: Status {response.status_code}")
+            print(f"Response snippet: {response.text[:300]}")
             return []
 
         data = response.json()
+        
+        if "errors" in data:
+            print(f"GraphQL error returned for {style_code}: {data['errors']}")
+            return []
+
         products = data.get("data", {}).get("site", {}).get("search", {}).get("searchProducts", {}).get("products", {}).get("edges", [])
         
         if not products:
@@ -103,15 +115,14 @@ def fetch_product_inventory(style_code: str):
 
         for edge in product_node.get("variants", {}).get("edges", []):
             v_node = edge["node"]
-            v_sku = v_node.get("sku", "")
             
             # Inventory calculation
             inv = v_node.get("inventory", {})
             stock_qty = 0
-            if inv.get("aggregated"):
-                stock_qty = inv["aggregated"].get("availableToSell", 0)
+            if inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
+                stock_qty = int(inv["aggregated"]["availableToSell"])
             elif inv.get("isInStock"):
-                stock_qty = 100  # Default fallback if exact integer is hidden
+                stock_qty = 100  # Default baseline if exact number is omitted
 
             # Parse color and size labels from options
             color_name = "DEFAULT"
@@ -143,14 +154,19 @@ def fetch_product_inventory(style_code: str):
         return variants_data
 
     except Exception as e:
-        print(f"Error fetching inventory for {style_code}: {e}")
+        print(f"Error fetching inventory for style {style_code}: {e}")
         return []
 
 def process_inventory():
+    print("Starting AS Colour inventory processing...")
+    
     for item in PRODUCT_STYLES:
         style_code = item["code"]
-        variants = fetch_product_inventory(style_code)
+        print(f"Checking style: {style_code}...")
         
+        variants = fetch_product_inventory(style_code)
+        print(f"Retrieved {len(variants)} variants for style {style_code}.")
+
         for v in variants:
             variant_id = v["variant_id"]
             title = v["product_title"]
@@ -160,12 +176,13 @@ def process_inventory():
 
             is_low_stock = (stock <= 25)
 
-            # Check database for existing record
+            # Check database for existing watchlist record
             res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
             existing_records = res.data
 
             if is_low_stock:
                 if not existing_records:
+                    # New low-stock item found
                     supabase.table("inventory_states").insert({
                         "variant_id": variant_id,
                         "colour_name": colour,
@@ -174,7 +191,9 @@ def process_inventory():
                         "is_below_25": True
                     }).execute()
                     send_alert(f"⚠️ **LOW STOCK ALERT**: {title} (`{variant_id}`) - **{colour} / {size}** has only **{stock}** units left!")
+                    print(f"ALERT: {variant_id} added to watchlist ({stock} units left).")
                 else:
+                    # Update stock level for existing low-stock item
                     supabase.table("inventory_states").update({
                         "stock_count": stock,
                         "is_below_25": True,
@@ -182,8 +201,12 @@ def process_inventory():
                     }).eq("variant_id", variant_id).execute()
             else:
                 if existing_records:
+                    # Item was previously low-stock but has now been restocked back above 25
                     send_alert(f"✅ **RESTOCK ALERT**: {title} (`{variant_id}`) - **{colour} / {size}** restocked to **{stock}** units!")
                     supabase.table("inventory_states").delete().eq("variant_id", variant_id).execute()
+                    print(f"RESTOCK: {variant_id} removed from watchlist ({stock} units).")
+
+    print("Inventory processing complete.")
 
 if __name__ == "__main__":
     process_inventory()
