@@ -35,29 +35,38 @@ def process_product(product_url: str):
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
+    # Extract style code from URL (e.g., '4001' from 'wos-maple-tee-4001')
+    style_code = product_url.rstrip("/").split("-")[-1]
+
     # 1. Extract color options
     colors = []
-    color_swatches = soup.select(".form-option-swatch span, [data-product-attribute='swatch'] .form-option-variant")
+    color_swatches = soup.select(".form-option-swatch span, [data-product-attribute='swatch'] .form-option-variant, [data-product-attribute='swatch'] label")
     for swatch in color_swatches:
         title = swatch.get("title") or swatch.text.strip()
-        if title and title not in colors:
+        if title and title not in colors and "Selected" not in title:
             colors.append(title)
 
     # 2. Extract size options
     sizes = []
-    size_options = soup.select("[data-product-attribute='set'] label, .form-type-set .form-option")
-    for opt in size_options:
-        text = opt.text.strip()
-        if text and text not in sizes and not text.startswith("Selected"):
-            sizes.append(text)
+    for select in soup.find_all("select"):
+        for opt in select.find_all("option"):
+            text = opt.text.strip()
+            if text and text not in sizes and not text.startswith("Choose") and not text.startswith("Select"):
+                sizes.append(text)
 
-    # Fallbacks if specific selectors change
-    if not colors:
-        colors = ["Default"]
     if not sizes:
-        sizes = ["Standard"]
+        size_options = soup.select("[data-product-attribute='set'] label, .form-type-set .form-option, .form-option-variant")
+        for opt in size_options:
+            text = opt.text.strip()
+            if text and text not in sizes and not text.startswith("Selected") and text not in colors:
+                sizes.append(text)
 
-    # 3. Extract BCData variant IDs and stock states
+    if not colors:
+        colors = ["DEFAULT"]
+    if not sizes:
+        sizes = ["STD"]
+
+    # 3. Extract BCData stock states
     scripts = soup.find_all("script")
     bc_data = None
 
@@ -78,17 +87,18 @@ def process_product(product_url: str):
         in_stock_list = bc_data.get("product_attributes", {}).get("in_stock_attributes", [])
         
         for idx, vid in enumerate(v_ids):
-            vid_str = str(vid)
-            
-            # Precise grid indexing
             colour_name = colors[(idx // len(sizes)) % len(colors)]
             size_name = sizes[idx % len(sizes)]
 
-            # Binary stock: 1 = In Stock, 0 = Out of Stock
+            # Build a human-readable clean ID: STYLE-COLOR-SIZE
+            clean_color_code = re.sub(r'[^A-Za-z0-9]', '', colour_name).upper()
+            clean_size_code = re.sub(r'[^A-Za-z0-9]', '', size_name).upper()
+            composite_variant_id = f"{style_code}-{clean_color_code}-{clean_size_code}"
+
             stock_count = 1 if vid in in_stock_list else 0
 
             variants.append({
-                "id": vid_str,
+                "id": composite_variant_id,
                 "colour": colour_name,
                 "size": size_name,
                 "stock": stock_count
@@ -100,7 +110,6 @@ def process_product(product_url: str):
         size = v["size"]
         stock = v["stock"]
 
-        # Alert if stock drops to 0 (Out of Stock)
         is_below_25 = (stock == 0)
 
         res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
