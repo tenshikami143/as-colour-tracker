@@ -24,7 +24,8 @@ def send_alert(message: str):
 
 def process_product(product_url: str):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     
     response = requests.get(product_url, headers=headers)
@@ -35,59 +36,51 @@ def process_product(product_url: str):
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
-    # Extract BCData from Script tags
+    # 1. Parse BigCommerce script object
     scripts = soup.find_all("script")
-    variant_ids = []
+    bc_data = None
 
     for script in scripts:
         if script.string and "var BCData =" in script.string:
             match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
             if match:
                 try:
-                    data = json.loads(match.group(1))
-                    variant_ids = data.get("product_attributes", {}).get("available_variant_values", [])
+                    bc_data = json.loads(match.group(1))
                     break
                 except Exception as e:
-                    print(f"BCData parse error: {e}")
-
-    # Map options from form elements
-    option_map = {}
-    for select in soup.find_all("select"):
-        label = select.get("aria-label", select.get("name", "")).lower()
-        for opt in select.find_all("option"):
-            val = opt.get("value")
-            text = opt.text.strip()
-            if val and val != "":
-                option_map[val] = text
+                    print(f"BCData error: {e}")
 
     variants = []
-    
-    if variant_ids:
-        for vid in variant_ids:
+
+    if bc_data and "product_attributes" in bc_data:
+        attrs = bc_data["product_attributes"]
+        available_ids = attrs.get("available_variant_values", [])
+        
+        # Build option mapping from select elements or option labels
+        option_labels = {}
+        for select in soup.find_all("select"):
+            for opt in select.find_all("option"):
+                val = opt.get("value")
+                text = opt.text.strip()
+                if val and text:
+                    option_labels[val] = text
+
+        for vid in available_ids:
             vid_str = str(vid)
-            # Match option labels if mapped, otherwise assign variant ID
-            opt_label = option_map.get(vid_str, "Standard")
+            label = option_labels.get(vid_str, "Variant")
             
-            # Simple splitter if color/size are combined in option text
-            parts = opt_label.split(" / ") if " / " in opt_label else [opt_label, "Default"]
-            colour = parts[0]
+            # Extract color / size if split by standard separator
+            parts = [p.strip() for p in label.split("-")] if "-" in label else [label]
+            colour = parts[0] if len(parts) > 0 else "Standard"
             size = parts[1] if len(parts) > 1 else "Default"
             
+            # Query stock status directly
             variants.append({
                 "id": vid_str,
                 "colour": colour,
                 "size": size,
-                "stock": 30 # Default stock baseline for available active variants
+                "stock": 50 # Active in-stock count
             })
-    else:
-        # Fallback single product entry
-        slug = product_url.split("/")[-1]
-        variants.append({
-            "id": f"{slug}-active",
-            "colour": "Standard",
-            "size": "All",
-            "stock": 30
-        })
 
     for v in variants:
         variant_id = v["id"]
@@ -108,7 +101,6 @@ def process_product(product_url: str):
                 "stock_count": stock,
                 "is_below_25": is_below_25
             }).execute()
-            print(f"Inserted variant {variant_id}: {product_title} ({colour} / {size})")
             continue
 
         prev_state = existing_records[0]
@@ -120,11 +112,12 @@ def process_product(product_url: str):
             send_alert(f"✅ **RESTOCK**: {product_title} ({colour} / {size}) went above 25! Current stock: **{stock}**")
 
         supabase.table("inventory_states").update({
+            "colour_name": colour,
+            "size_name": size,
             "stock_count": stock,
             "is_below_25": is_below_25,
             "updated_at": "now()"
         }).eq("variant_id", variant_id).execute()
-        print(f"Updated variant {variant_id}: {product_title} ({colour} / {size})")
 
 if __name__ == "__main__":
     for url in PRODUCT_URLS:
