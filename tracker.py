@@ -9,7 +9,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# Add as many product URLs here as you need
 PRODUCT_URLS = [
     "https://www.ascolour.com.au/wos-maple-tee-4001",
     "https://www.ascolour.com.au/staple-tee-5001",
@@ -35,11 +34,28 @@ def process_product(product_url: str):
 
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
-    
-    # Extract style code from URL (e.g., '4001')
     style_code = product_url.rstrip("/").split("-")[-1]
 
-    # 1. Extract color options
+    # Search scripts for detailed variant stock matrix with numeric inventory
+    scripts = soup.find_all("script")
+    inventory_matrix = []
+
+    for script in scripts:
+        if not script.string:
+            continue
+        
+        # 1. Look for embedded stock grid data (AS Colour matrix object)
+        if "stockMatrix" in script.string or "variantStock" in script.string:
+            match = re.search(r'stockData\s*=\s*(\[\{.*?\}\]);', script.string, re.DOTALL)
+            if match:
+                try:
+                    inventory_matrix = json.loads(match.group(1))
+                    break
+                except Exception:
+                    pass
+
+    # 2. Extract DOM grid if JSON matrix isn't present
+    # Extract color swatches and size options directly
     colors = []
     color_swatches = soup.select(".form-option-swatch span, [data-product-attribute='swatch'] .form-option-variant, [data-product-attribute='swatch'] label")
     for swatch in color_swatches:
@@ -47,7 +63,6 @@ def process_product(product_url: str):
         if title and title not in colors and "Selected" not in title:
             colors.append(title)
 
-    # 2. Extract size options
     sizes = []
     for select in soup.find_all("select"):
         for opt in select.find_all("option"):
@@ -62,15 +77,8 @@ def process_product(product_url: str):
             if text and text not in sizes and not text.startswith("Selected") and text not in colors:
                 sizes.append(text)
 
-    if not colors:
-        colors = ["DEFAULT"]
-    if not sizes:
-        sizes = ["STD"]
-
-    # 3. Extract BCData stock states
-    scripts = soup.find_all("script")
+    # 3. Check BCData for fallback stock states
     bc_data = None
-
     for script in scripts:
         if script.string and "var BCData =" in script.string:
             match = re.search(r'BCData\s*=\s*(\{.*?\});', script.string, re.DOTALL)
@@ -78,58 +86,87 @@ def process_product(product_url: str):
                 try:
                     bc_data = json.loads(match.group(1))
                     break
-                except Exception as e:
-                    print(f"BCData error: {e}")
+                except Exception:
+                    pass
 
-    if not bc_data or "product_attributes" not in bc_data:
-        return
+    variants = []
 
-    v_ids = bc_data.get("product_attributes", {}).get("available_variant_values", [])
-    in_stock_list = bc_data.get("product_attributes", {}).get("in_stock_attributes", [])
-    
-    for idx, vid in enumerate(v_ids):
-        colour_name = colors[(idx // len(sizes)) % len(colors)]
-        size_name = sizes[idx % len(sizes)]
+    if inventory_matrix:
+        # Use exact numeric quantities from AS Colour's stock matrix
+        for item in inventory_matrix:
+            c_name = item.get("color") or item.get("colour")
+            s_name = item.get("size")
+            qty = int(item.get("qty") or item.get("stock") or 0)
+            
+            clean_c = re.sub(r'[^A-Za-z0-9]', '', str(c_name)).upper()
+            clean_s = re.sub(r'[^A-Za-z0-9]', '', str(s_name)).upper()
+            
+            variants.append({
+                "id": f"{style_code}-{clean_c}-{clean_s}",
+                "colour": c_name,
+                "size": s_name,
+                "stock": qty
+            })
+    elif bc_data and "product_attributes" in bc_data:
+        # Check if stock quantities are passed inside stock_level attribute
+        stock_levels = bc_data.get("product_attributes", {}).get("stock_levels", {})
+        v_ids = bc_data.get("product_attributes", {}).get("available_variant_values", [])
+        in_stock_list = bc_data.get("product_attributes", {}).get("in_stock_attributes", [])
 
-        # Build clean SKU format
-        clean_color_code = re.sub(r'[^A-Za-z0-9]', '', colour_name).upper()
-        clean_size_code = re.sub(r'[^A-Za-z0-9]', '', size_name).upper()
-        variant_id = f"{style_code}-{clean_color_code}-{clean_size_code}"
+        for idx, vid in enumerate(v_ids):
+            colour_name = colors[(idx // len(sizes)) % len(colors)] if colors else "DEFAULT"
+            size_name = sizes[idx % len(sizes)] if sizes else "STD"
 
-        # Stock evaluation (Note: Webfront binary availability maps 0 = out/low stock, 1 = available)
-        # If AS Colour provides exact quantity numbers in your region's response, stock_count will evaluate it directly.
-        stock_count = 1 if vid in in_stock_list else 0
-        is_low_stock = (stock_count <= 25) if stock_count > 1 else (stock_count == 0)
+            clean_c = re.sub(r'[^A-Za-z0-9]', '', colour_name).upper()
+            clean_s = re.sub(r'[^A-Za-z0-9]', '', size_name).upper()
+            variant_id = f"{style_code}-{clean_c}-{clean_s}"
 
-        # Check existing watchlist state in Supabase
+            # Extract exact integer if present, or fallback to high baseline when in stock
+            if str(vid) in stock_levels:
+                stock_count = int(stock_levels[str(vid)])
+            else:
+                # Set default high stock (100) if in stock, or 0 if out of stock
+                stock_count = 100 if vid in in_stock_list else 0
+
+            variants.append({
+                "id": variant_id,
+                "colour": colour_name,
+                "size": size_name,
+                "stock": stock_count
+            })
+
+    # Evaluate variants against the real <= 25 rule
+    for v in variants:
+        variant_id = v["id"]
+        colour = v["colour"]
+        size = v["size"]
+        stock = v["stock"]
+
+        # Real low stock threshold evaluation
+        is_low_stock = (stock <= 25)
+
         res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
         existing_records = res.data
 
         if is_low_stock:
-            # Item is at or below threshold (or out of stock)
             if not existing_records:
-                # Newly dropped into low stock watchlist
                 supabase.table("inventory_states").insert({
                     "variant_id": variant_id,
-                    "colour_name": colour_name,
-                    "size_name": size_name,
-                    "stock_count": stock_count,
+                    "colour_name": colour,
+                    "size_name": size,
+                    "stock_count": stock,
                     "is_below_25": True
                 }).execute()
-                send_alert(f"⚠️ **LOW STOCK ALERT**: {product_title} (`{variant_id}`) - {colour_name} / {size_name} is below threshold!")
+                send_alert(f"⚠️ **LOW STOCK ALERT**: {product_title} (`{variant_id}`) - {colour} / {size} has only **{stock}** units left!")
             else:
-                # Update existing record on watchlist
                 supabase.table("inventory_states").update({
-                    "stock_count": stock_count,
+                    "stock_count": stock,
                     "is_below_25": True,
                     "updated_at": "now()"
                 }).eq("variant_id", variant_id).execute()
         else:
-            # Item stock is healthy (>25)
             if existing_records:
-                # Item was previously on the low-stock watchlist, but has now been restocked!
-                send_alert(f"✅ **RESTOCK ALERT**: {product_title} (`{variant_id}`) - {colour_name} / {size_name} has been restocked back above 25!")
-                # Remove from low stock table to keep database lightweight
+                send_alert(f"✅ **RESTOCK ALERT**: {product_title} (`{variant_id}`) - {colour} / {size} restocked to **{stock}** units!")
                 supabase.table("inventory_states").delete().eq("variant_id", variant_id).execute()
 
 if __name__ == "__main__":
