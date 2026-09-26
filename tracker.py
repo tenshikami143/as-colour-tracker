@@ -6,7 +6,19 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-PRODUCT_JSON_URL = "https://www.ascolour.com.au/wos-maple-tee-4001.json" 
+# --- ADD YOUR AS COLOUR PRODUCT URLS HERE ---
+PRODUCT_URLS = [
+    "https://www.ascolour.com.au/wos-maple-tee-4001.json",
+    # Add extra products below by pasting their URL with .json at the end:
+    "https://www.ascolour.com.au/staple-tee-5001.json",
+    "https://www.ascolour.com.au/stencil-hood-5102.json",
+    "https://www.ascolour.com.au/classic-tee-5026.json",
+
+
+
+
+    
+]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -14,14 +26,17 @@ def send_alert(message: str):
     if DISCORD_WEBHOOK_URL:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
 
-def process_inventory():
+def process_product(product_url: str):
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(PRODUCT_JSON_URL, headers=headers)
+    response = requests.get(product_url, headers=headers)
     if response.status_code != 200:
-        print(f"Failed to fetch inventory. Status code: {response.status_code}")
+        print(f"Failed to fetch {product_url}. Status code: {response.status_code}")
         return
 
     data = response.json()
+    
+    # Get product title for clearer notifications
+    product_title = data.get("product", {}).get("title") if "product" in data else data.get("title", "Product")
     variants = data.get("product", {}).get("variants", []) if "product" in data else data.get("variants", [])
 
     for variant in variants:
@@ -49,9 +64,9 @@ def process_inventory():
         prev_is_below_25 = prev_state["is_below_25"]
 
         if not prev_is_below_25 and is_below_25:
-            send_alert(f"⚠️ **LOW STOCK**: Wo's Maple Tee ({colour} / {size}) dropped below 25! Current stock: **{stock}**")
+            send_alert(f"⚠️ **LOW STOCK**: {product_title} ({colour} / {size}) dropped below 25! Current stock: **{stock}**")
         elif prev_is_below_25 and not is_below_25:
-            send_alert(f"✅ **RESTOCK**: Wo's Maple Tee ({colour} / {size}) went above 25! Current stock: **{stock}**")
+            send_alert(f"✅ **RESTOCK**: {product_title} ({colour} / {size}) went above 25! Current stock: **{stock}**")
 
         supabase.table("inventory_states").update({
             "stock_count": stock,
@@ -59,5 +74,9 @@ def process_inventory():
             "updated_at": "now()"
         }).eq("variant_id", variant_id).execute()
 
+def process_all_inventory():
+    for url in PRODUCT_URLS:
+        process_product(url)
+
 if __name__ == "__main__":
-    process_inventory()
+    process_all_inventory()
