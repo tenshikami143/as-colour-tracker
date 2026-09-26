@@ -16,8 +16,6 @@ PRODUCT_URLS = [
     "https://www.ascolour.com.au/classic-tee-5026",
 ]
 
-GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def send_alert(message: str):
@@ -37,7 +35,29 @@ def process_product(product_url: str):
     soup = BeautifulSoup(response.text, "html.parser")
     product_title = soup.find("h1").text.strip() if soup.find("h1") else "AS Colour Garment"
     
-    # 1. Parse BCData for variant list and available attributes
+    # 1. Extract color options
+    colors = []
+    color_swatches = soup.select(".form-option-swatch span, [data-product-attribute='swatch'] .form-option-variant")
+    for swatch in color_swatches:
+        title = swatch.get("title") or swatch.text.strip()
+        if title and title not in colors:
+            colors.append(title)
+
+    # 2. Extract size options
+    sizes = []
+    size_options = soup.select("[data-product-attribute='set'] label, .form-type-set .form-option")
+    for opt in size_options:
+        text = opt.text.strip()
+        if text and text not in sizes and not text.startswith("Selected"):
+            sizes.append(text)
+
+    # Fallbacks if specific selectors change
+    if not colors:
+        colors = ["Default"]
+    if not sizes:
+        sizes = ["Standard"]
+
+    # 3. Extract BCData variant IDs and stock states
     scripts = soup.find_all("script")
     bc_data = None
 
@@ -49,31 +69,23 @@ def process_product(product_url: str):
                     bc_data = json.loads(match.group(1))
                     break
                 except Exception as e:
-                    print(f"BCData parse error: {e}")
+                    print(f"BCData error: {e}")
 
     variants = []
 
-    # 2. Scrape swatches / variants from DOM elements if present
-    color_elements = soup.select("[data-product-attribute='swatch'] label, .form-option-variant")
-    size_elements = soup.select("[data-product-attribute='set'] label, .form-option")
-
-    colors = [c.text.strip() for c in color_elements if c.text.strip()]
-    sizes = [s.text.strip() for s in size_elements if s.text.strip()]
-
     if bc_data and "product_attributes" in bc_data:
         v_ids = bc_data.get("product_attributes", {}).get("available_variant_values", [])
+        in_stock_list = bc_data.get("product_attributes", {}).get("in_stock_attributes", [])
         
-        # Build variant grid based on available IDs and option labels
         for idx, vid in enumerate(v_ids):
             vid_str = str(vid)
             
-            # Map index to color/size if lists available, or use clean variant ID label
-            colour_name = colors[idx % len(colors)] if colors else f"Color-{idx + 1}"
-            size_name = sizes[(idx // len(colors)) % len(sizes)] if sizes and colors else "Standard"
+            # Precise grid indexing
+            colour_name = colors[(idx // len(sizes)) % len(colors)]
+            size_name = sizes[idx % len(sizes)]
 
-            # Determine baseline stock state from in_stock_attributes array
-            in_stock_list = bc_data.get("product_attributes", {}).get("in_stock_attributes", [])
-            stock_count = 30 if vid in in_stock_list else 0
+            # Binary stock: 1 = In Stock, 0 = Out of Stock
+            stock_count = 1 if vid in in_stock_list else 0
 
             variants.append({
                 "id": vid_str,
@@ -88,7 +100,8 @@ def process_product(product_url: str):
         size = v["size"]
         stock = v["stock"]
 
-        is_below_25 = stock < 25
+        # Alert if stock drops to 0 (Out of Stock)
+        is_below_25 = (stock == 0)
 
         res = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
         existing_records = res.data
@@ -101,16 +114,15 @@ def process_product(product_url: str):
                 "stock_count": stock,
                 "is_below_25": is_below_25
             }).execute()
-            print(f"Inserted variant {variant_id}: {product_title} ({colour} / {size}) - Stock: {stock}")
             continue
 
         prev_state = existing_records[0]
         prev_is_below_25 = prev_state["is_below_25"]
 
         if not prev_is_below_25 and is_below_25:
-            send_alert(f"⚠️ **LOW STOCK**: {product_title} ({colour} / {size}) dropped below 25! Current stock: **{stock}**")
+            send_alert(f"⚠️ **OUT OF STOCK**: {product_title} ({colour} / {size}) is now out of stock!")
         elif prev_is_below_25 and not is_below_25:
-            send_alert(f"✅ **RESTOCK**: {product_title} ({colour} / {size}) went above 25! Current stock: **{stock}**")
+            send_alert(f"✅ **RESTOCK**: {product_title} ({colour} / {size}) is back in stock!")
 
         supabase.table("inventory_states").update({
             "colour_name": colour,
@@ -119,7 +131,6 @@ def process_product(product_url: str):
             "is_below_25": is_below_25,
             "updated_at": "now()"
         }).eq("variant_id", variant_id).execute()
-        print(f"Updated variant {variant_id}: {product_title} ({colour} / {size}) - Stock: {stock}")
 
 if __name__ == "__main__":
     for url in PRODUCT_URLS:
