@@ -13,6 +13,7 @@ ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN", "")
 PRODUCT_STYLES = [
     {"code": "5026", "title": "Classic Tee 5026"},
     {"code": "5001", "title": "Staple Tee 5001"},
+    {"code": "5001m", "title": "Staple Marle Tee 5001m"},
     {"code": "4001", "title": "WOS Maple Tee 4001"},
     {"code": "5102", "title": "Stencil Hood 5102"},
     {"code": "5080", "title": "Heavy Tee 5080"},
