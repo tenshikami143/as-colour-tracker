@@ -84,6 +84,7 @@ PRODUCT_STYLES = [
     {"code": "4064g", "title": "WOS Organic Rib Crop Tank 4064g"},
     {"code": "5103", "title": "Stencil Crew 5103"},
     {"code": "5069", "title": "Classic Oversized Tee 5069"},
+    {"code": "5053", "title": "Staple Ringer Tee 5053"},
     {"code": "4053", "title": "WOS Maple Ringer Tee 4053"}
 ]
 
