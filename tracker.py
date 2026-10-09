@@ -194,4 +194,69 @@ def send_discord_alert(new_low_stock, restocked):
             "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
             "🛡️ **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
             "🌴 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
-            "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report.
+            "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
+            "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘‍♂️",
+            "🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 👨‍🚀",
+            "☕ **Pour Another Cup:** Everything is looking great across the catalog today. Sit back and enjoy your morning brew! ☕",
+            "🌟 **Golden Ratio:** No new low stock, no restock chaos. Just a pristine, smooth inventory run! ✨",
+            "💤 **Sleeping Soundly:** The inventory warehouse is completely undisturbed today. Shhh, don't wake the tees! 👕💤",
+            "🎈 **Flawless Run:** Today's scan went smoother than butter. All monitored styles are safe and sound! 🧈",
+            "🧭 **On Course:** Staying steady on the high seas! Zero inventory emergencies detected in the last 24 hours. ⚓",
+            "🕶️ **Too Cool for Stock Outs:** Stock levels are staying comfortable today. Put on those shades and enjoy your morning! 😎",
+            "🏆 **Victory Lap:** No low-stock flags raised today! You're winning the inventory game. 🏆",
+            "🥑 **Holy Guacamole!** Another day, another completely clean inventory report. Keep crushing it! 🥑",
+            "🕹️ **Level Complete:** Daily scan finished with 0 errors and 0 inventory alerts! Maximum score achieved. 🎮",
+            "🌈 **Sunshine & Rainbows:** Nothing but healthy stock numbers across all 73 styles today! 🌈",
+            "📦 **Warehouse Whispers:** The shelves are quiet today. All target variants are staying right where they belong! 🤫",
+            "🚀 **Cruising Altitude:** 30,000 feet up and zero turbulence in the stock room today! ✈️",
+            "🎶 **Sweet Harmony:** All styles are in perfect sync today. Not a single stock alarm sounded! 🎵",
+            "🧙‍♂️ **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
+            "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
+            "🎨 **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
+            "🔋 **Fully Charged:** Stock levels across all monitored items are looking super healthy today! ⚡",
+            "🥇 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🥇",
+            "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
+            "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
+            "🍀 **Lucky Days:** No surprise out-of-stock events today. Lady Luck is on our side! 🍀",
+            "🚗 **Smooth Highway:** Cruising on green lights all morning. No inventory speed bumps today! 🚦",
+            "🏰 **Castle Guarded:** The inventory fortress remains untouched today. All stock holds firm! 🏰",
+            "🍕 **Pizza Time:** No inventory crises to handle today, so you've earned a pizza slice later! 🍕"
+        ]
+        
+        payload = {
+            "username": "AS Colour Inventory Bot",
+            "embeds": [{
+                "title": "✅ Daily Inventory Check: All Quiet!",
+                "description": random.choice(fun_messages),
+                "color": 3447003,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }]
+        }
+
+    res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    if res.status_code in [200, 204]:
+        print("Discord alert delivered successfully.")
+    else:
+        print(f"Failed to send Discord alert: {res.status_code} - {res.text}")
+
+def main():
+    scanned_items = fetch_monitored_inventory()
+    print(f"Scanned {len(scanned_items)} target variants from API.")
+
+    # Retrieve active DB records
+    existing_records = supabase.table("inventory_states").select("*").execute().data
+    db_map = {(r["variant_id"], r["colour_name"], r["size_name"]): r for r in existing_records}
+
+    new_low_stock = []
+    restocked = []
+    upsert_payload = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for (style, colour, size), current_stock in scanned_items.items():
+        db_item = db_map.get((style, colour, size))
+        prev_stock = db_item.get("stock_count") if db_item else None
+
+        # Newly dropped below 25
+        if current_stock < 25:
+            if prev_stock is None or prev_stock >= 25:
+                new
