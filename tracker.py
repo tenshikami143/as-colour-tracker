@@ -29,10 +29,11 @@ TARGET_STYLES = [
 ]
 
 def fetch_monitored_inventory():
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
+   headers = {
+        "Content-Type": "application/json"
     }
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     
     scanned_items = {}
     has_next_products = True
