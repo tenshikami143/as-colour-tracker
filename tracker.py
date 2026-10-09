@@ -67,10 +67,12 @@ def fetch_monitored_inventory():
                   node {
                     id
                     sku
-                    options {
-                      displayName
-                      values {
-                        label
+                    selectedOptions {
+                      edges {
+                        node {
+                          name
+                          value
+                        }
                       }
                     }
                     inventory {
@@ -119,18 +121,19 @@ def fetch_monitored_inventory():
                         v_node = v_edge.get("node", {})
                         variant_sku = v_node.get("sku", "").strip()
                         
-                        # Extract color and size from variant options safely
+                        # Extract color and size from selectedOptions safely
                         colour = "N/A"
                         size = "N/A"
-                        for opt in v_node.get("options", []):
-                            name_lower = opt.get("displayName", "").lower()
-                            values = [val.get("label") for val in opt.get("values", [])]
-                            val_str = ", ".join(values) if values else "N/A"
+                        options_edges = v_node.get("selectedOptions", {}).get("edges", [])
+                        for opt_edge in options_edges:
+                            opt_node = opt_edge.get("node", {})
+                            name_lower = opt_node.get("name", "").lower()
+                            val = opt_node.get("value", "N/A")
                             
                             if "colour" in name_lower or "color" in name_lower:
-                                colour = val_str
+                                colour = val
                             elif "size" in name_lower:
-                                size = val_str
+                                size = val
 
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
