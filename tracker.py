@@ -100,6 +100,7 @@ def send_alert(message: str):
 def fetch_product_inventory(style_code: str):
     graphql_url = "https://www.ascolour.com.au/graphql"
     
+    # Added (first: 250) to variants query to override default 10-item limit
     query = """
     query getProductInventory($searchTerm: String!) {
       site {
@@ -111,7 +112,7 @@ def fetch_product_inventory(style_code: str):
                   entityId
                   name
                   sku
-                  variants {
+                  variants(first: 250) {
                     edges {
                       node {
                         entityId
