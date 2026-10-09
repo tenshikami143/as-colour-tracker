@@ -259,4 +259,39 @@ def main():
         # Newly dropped below 25
         if current_stock < 25:
             if prev_stock is None or prev_stock >= 25:
-                new
+                new_low_stock.append({
+                    "variant_id": style, "colour_name": colour, "size_name": size, "stock_count": current_stock
+                })
+            
+            upsert_payload.append({
+                "variant_id": style,
+                "colour_name": colour,
+                "size_name": size,
+                "stock_count": current_stock,
+                "previous_stock_count": prev_stock,
+                "is_below_25": True,
+                "updated_in_deconetwork": False,
+                "last_changed_at": now_iso
+            })
+
+        # Restocked to 25+ from low stock state
+        elif current_stock >= 25 and db_item and db_item.get("is_below_25"):
+            restocked.append({
+                "variant_id": style, "colour_name": colour, "size_name": size, "stock_count": current_stock
+            })
+            # Clean up restocked item from Supabase
+            supabase.table("inventory_states").delete().match({
+                "variant_id": style,
+                "colour_name": colour,
+                "size_name": size
+            }).execute()
+
+    # Sync remaining low-stock items
+    if upsert_payload:
+        supabase.table("inventory_states").upsert(upsert_payload).execute()
+
+    # Send Discord notification (Digest or Fun All-Clear Ping)
+    send_discord_alert(new_low_stock, restocked)
+
+if __name__ == "__main__":
+    main()
