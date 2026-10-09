@@ -33,13 +33,58 @@ TARGET_STYLES = [
     "5161", "5162", "5402"
 ]
 
+# Translation dictionaries for cleaner readability
+COLOUR_MAP = {
+    "GRE_M": "Grey Marle",
+    "NAT_R": "Natural",
+    "BLACK": "Black",
+    "WHITE": "White",
+    "NAVY": "Navy",
+    "PINK": "Pink",
+    "SAGE": "Sage",
+    "ARMY": "Army",
+    "BONE": "Bone",
+    "BURGU": "Burgundy",
+    "CAMEL": "Camel",
+    "CHA_P": "Charcoal",
+    "COAL": "Coal",
+    "CREAM": "Cream",
+    "DAR_C": "Dark Charcoal",
+    "FORES": "Forest Green",
+    "KEL_G": "Kelly Green",
+    "KHAKI": "Khaki",
+    "LBRTY": "Liberty",
+    "MUSH": "Mushroom",
+    "MUSTA": "Mustard",
+    "ORANG": "Orange"
+}
+
+SIZE_MAP = {
+    "S1218": "12-18 Months",
+    "T1824": "18-24 Months",
+    "P0-3": "0-3 Months",
+    "Q3-6": "3-6 Months",
+    "R6-12": "6-12 Months",
+    "OS": "One Size",
+    "XSM": "XS",
+    "SML": "Small",
+    "MED": "Medium",
+    "LGE": "Large",
+    "XLG": "XL",
+    "2XL": "2XL",
+    "3XL": "3XL"
+}
+
 
 def parse_sku_attributes(variant_sku):
-    # Parses '1000-BLACK-P-OS' into colour='BLACK', size='P-OS'
     parts = variant_sku.split("-")
     if len(parts) >= 3:
-        colour = parts[1]
-        size = "-".join(parts[2:])
+        raw_colour = parts[1]
+        raw_size = "-".join(parts[2:])
+        
+        colour = COLOUR_MAP.get(raw_colour, raw_colour.replace("_", " ").title())
+        size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
+        
         return colour, size
     return "N/A", "N/A"
 
@@ -149,7 +194,7 @@ def fetch_monitored_inventory():
 
 
 def sync_inventory_and_alert():
-    print("Fetching catalog data with clean SKU attributes from AS Colour Australia...")
+    print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
@@ -157,7 +202,6 @@ def sync_inventory_and_alert():
         print("No inventory data retrieved. Exiting.")
         return
 
-    # Fetch existing states from Supabase using variant_id
     response = supabase.table("inventory_states").select("*").execute()
     previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
 
