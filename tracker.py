@@ -65,9 +65,12 @@ def fetch_product_inventory():
             inv = v_node.get("inventory", {})
             sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            stock_qty = 999 
+            # Check if BigCommerce returned an explicit stock count
             if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
+            else:
+                # If None, stock is high/hidden. For testing, let's assign 500 so it's clearly non-zero.
+                stock_qty = 500 
                 
             # TEMPORARY TEST THRESHOLD: Set to 1000 to catch items and test Supabase insertion
             if stock_qty < 1000:
@@ -109,7 +112,7 @@ def main():
             supabase.table("inventory_states").update({
                 "stock_count": stock
             }).eq("variant_id", variant_id).execute()
-            print(f"Updated test item in Supabase: {item['sku']}")
+            print(f"Updated test item in Supabase: {item['sku']} (Stock: {stock})")
 
 if __name__ == "__main__":
     main()
