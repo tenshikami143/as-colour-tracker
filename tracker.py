@@ -35,6 +35,11 @@ TARGET_STYLES = [
 
 # Translation dictionaries for cleaner readability
 COLOUR_MAP = {
+    "Snset": "Sunset",
+    "Buttr": "Butter",
+    "Orchi": "Orchid",
+    "Powdr": "Powder",
+    "Walnt": "Walnut",
     "GRE_M": "Grey Marle",
     "NAT_R": "Natural",
     "BLACK": "Black",
@@ -60,6 +65,7 @@ COLOUR_MAP = {
 }
 
 SIZE_MAP = {
+    "P-Os": "One Size",
     "S1218": "12-18 Months",
     "T1824": "18-24 Months",
     "P0-3": "0-3 Months",
