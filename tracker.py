@@ -67,6 +67,12 @@ def fetch_monitored_inventory():
                   node {
                     id
                     sku
+                    options {
+                      displayName
+                      values {
+                        label
+                      }
+                    }
                     inventory {
                       aggregated {
                         availableToSell
@@ -105,6 +111,7 @@ def fetch_monitored_inventory():
             for edge in edges:
                 product = edge.get("node", {})
                 style_sku = product.get("sku", "").strip()
+                product_name = product.get("name", "").strip()
 
                 if style_sku in TARGET_STYLES:
                     variants = product.get("variants", {}).get("edges", [])
@@ -112,13 +119,28 @@ def fetch_monitored_inventory():
                         v_node = v_edge.get("node", {})
                         variant_sku = v_node.get("sku", "").strip()
                         
+                        # Extract color and size from variant options safely
+                        colour = "N/A"
+                        size = "N/A"
+                        for opt in v_node.get("options", []):
+                            name_lower = opt.get("displayName", "").lower()
+                            values = [val.get("label") for val in opt.get("values", [])]
+                            val_str = ", ".join(values) if values else "N/A"
+                            
+                            if "colour" in name_lower or "color" in name_lower:
+                                colour = val_str
+                            elif "size" in name_lower:
+                                size = val_str
+
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
                                 "style_sku": style_sku,
-                                "product_name": product.get("name"),
+                                "product_name": product_name,
+                                "colour_name": colour,
+                                "size_name": size,
                                 "stock": stock
                             }
 
@@ -134,7 +156,7 @@ def fetch_monitored_inventory():
 
 
 def sync_inventory_and_alert():
-    print("Fetching catalog data for 73 target styles from AS Colour Australia...")
+    print("Fetching catalog data with readable attributes from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
@@ -155,20 +177,22 @@ def sync_inventory_and_alert():
         prev_data = previous_states.get(sku)
         is_low = stock < 25
 
-        # Only trigger an alert if we have a previous baseline state recorded
         if prev_data is not None:
             was_low = prev_data.get("is_below_25", False)
             if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']}) -> Stock: **{stock}** units")
+                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
 
         upsert_payload.append({
             "variant_id": sku,
+            "style_sku": item_data["style_sku"],
+            "product_name": item_data["product_name"],
+            "colour_name": item_data["colour_name"],
+            "size_name": item_data["size_name"],
             "stock_count": stock,
             "is_below_25": is_low,
             "updated_at": now_iso
         })
 
-    # Batch upsert matching Supabase columns
     if upsert_payload:
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
@@ -179,7 +203,6 @@ def sync_inventory_and_alert():
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk})
             print(f"Sent {len(alerts)} alert(s) to Discord.")
         else:
-            # No changes or first-run baseline established - send fun cheerful notification
             fun_messages = [
                 "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
                 "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
