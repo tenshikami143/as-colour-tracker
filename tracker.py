@@ -1,5 +1,6 @@
 import os
 import requests
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 
 # Initialize Supabase credentials
@@ -7,12 +8,14 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour GraphQL API credentials/endpoints
+# AS Colour GraphQL API credentials
 GRAPHQL_URL = os.environ.get("AS_COLOUR_GRAPHQL_URL")
 API_TOKEN = os.environ.get("AS_COLOUR_API_TOKEN")
 
-# List of target base style numbers extracted from your monitored URL list.
-# Add or remove style codes here anytime to update what gets tracked.
+# Discord Webhook
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
+# Monitored Scope (73 Target Styles)
 TARGET_STYLES = [
     "1000", "1001", "1002", "1117", "3001", "3003", "3005", "3006", "3009", "3010",
     "3030", "3031", "3032", "3033", "3034", "3035", "3036", "3037", "4001", "4001g",
@@ -30,50 +33,32 @@ def fetch_monitored_inventory():
         "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
     }
     
-    scanned_items = []
+    scanned_items = {}
     has_next_products = True
     product_cursor = None
 
     query = """
-    query FetchCatalog($productCursor: String, $variantCursor: String) {
+    query FetchCatalog($productCursor: String,$variantCursor: String) {
       site {
         products(first: 50, after: $productCursor) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
+          pageInfo { hasNextPage endCursor }
           edges {
             node {
-              id
-              name
+              id name
               variants(first: 50, after: $variantCursor) {
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
+                pageInfo { hasNextPage endCursor }
                 edges {
                   node {
-                    id
-                    sku
+                    id sku
                     options {
                       edges {
                         node {
                           displayName
-                          values {
-                            edges {
-                              node {
-                                label
-                              }
-                            }
-                          }
+                          values { edges { node { label } } }
                         }
                       }
                     }
-                    inventory {
-                      aggregated {
-                        availableToSell
-                      }
-                    }
+                    inventory { aggregated { availableToSell } }
                   }
                 }
               }
@@ -84,132 +69,169 @@ def fetch_monitored_inventory():
     }
     """
 
-    print(f"Scanning AS Colour catalog for {len(TARGET_STYLES)} target styles...")
+    print("Fetching catalog data from AS Colour...")
 
     while has_next_products:
         variables = {"productCursor": product_cursor, "variantCursor": None}
         response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
-        
         if response.status_code != 200:
-            print(f"API Error: {response.status_code} - {response.text}")
+            print(f"API Error: {response.status_code}")
             break
 
-        data = response.json()
-        products_data = data.get("data", {}).get("site", {}).get("products", {})
-        products = products_data.get("edges", [])
+        products_data = response.json().get("data", {}).get("site", {}).get("products", {})
         
-        for product_edge in products:
+        for product_edge in products_data.get("edges", []):
             product_node = product_edge["node"]
-            
             has_next_variants = True
             variant_cursor = None
             
             while has_next_variants:
                 if variant_cursor:
-                    var_variables = {"productCursor": product_cursor, "variantCursor": variant_cursor}
-                    v_response = requests.post(GRAPHQL_URL, json={"query": query, "variables": var_variables}, headers=headers)
-                    if v_response.status_code != 200:
-                        break
-                    v_data = v_response.json()
-                    p_edges = v_data.get("data", {}).get("site", {}).get("products", {}).get("edges", [])
+                    var_vars = {"productCursor": product_cursor, "variantCursor": variant_cursor}
+                    v_res = requests.post(GRAPHQL_URL, json={"query": query, "variables": var_vars}, headers=headers)
+                    if v_res.status_code != 200: break
+                    p_edges = v_res.json().get("data", {}).get("site", {}).get("products", {}).get("edges", [])
                     target_p = next((p["node"] for p in p_edges if p["node"]["id"] == product_node["id"]), None)
-                    if not target_p:
-                        break
+                    if not target_p: break
                     variants_data = target_p.get("variants", {})
                 else:
                     variants_data = product_node.get("variants", {})
 
-                variant_edges = variants_data.get("edges", [])
-
-                for edge in variant_edges:
+                for edge in variants_data.get("edges", []):
                     v_node = edge["node"]
                     inv = v_node.get("inventory", {})
                     full_sku = v_node.get("sku", "UNKNOWN-SKU")
                     
-                    # Extract clean base style string
-                    base_sku = full_sku.split("-")[0].lower() if "-" in full_sku else full_sku.lower()
+                    base_sku = full_sku.split("-")[0].upper() if "-" in full_sku else full_sku.upper()
                     
-                    # FILTER: Skip variants if base style is not in our TARGET_STYLES list
-                    if base_sku not in [s.lower() for s in TARGET_STYLES]:
+                    if base_sku.lower() not in [s.lower() for s in TARGET_STYLES]:
                         continue
                     
-                    colour = "UNKNOWN"
-                    size = "OS"
-                    
-                    for option_edge in v_node.get("options", {}).get("edges", []):
-                        opt_node = option_edge.get("node", {})
+                    colour, size = "UNKNOWN", "OS"
+                    for opt_edge in v_node.get("options", {}).get("edges", []):
+                        opt_node = opt_edge.get("node", {})
                         opt_name = opt_node.get("displayName", "").lower()
-                        
                         vals = opt_node.get("values", {}).get("edges", [])
                         if vals:
-                            val_label = vals[0].get("node", {}).get("label", "")
-                            if "color" in opt_name or "colour" in opt_name:
-                                colour = val_label
-                            elif "size" in opt_name:
-                                size = val_label
-                                
-                    if colour == "UNKNOWN" and "-" in full_sku:
-                        parts = full_sku.split("-")
-                        colour = parts[1] if len(parts) > 1 else "UNKNOWN"
-                        size = "-".join(parts[2:]) if len(parts) > 2 else size
+                            label = vals[0].get("node", {}).get("label", "")
+                            if "color" in opt_name or "colour" in opt_name: colour = label
+                            elif "size" in opt_name: size = label
 
                     stock_qty = 999 
                     if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                         stock_qty = int(inv["aggregated"]["availableToSell"])
-                        
-                    scanned_items.append({
-                        "base_sku": base_sku.upper(),
-                        "colour_name": colour,
-                        "size_name": size,
-                        "stock_count": stock_qty
-                    })
 
-                var_page_info = variants_data.get("pageInfo", {})
-                has_next_variants = var_page_info.get("hasNextPage", False)
-                variant_cursor = var_page_info.get("endCursor")
+                    key = (base_sku, colour, size)
+                    scanned_items[key] = stock_qty
 
-        prod_page_info = products_data.get("pageInfo", {})
-        has_next_products = prod_page_info.get("hasNextPage", False)
-        product_cursor = prod_page_info.get("endCursor")
+                var_page = variants_data.get("pageInfo", {})
+                has_next_variants = var_page.get("hasNextPage", False)
+                variant_cursor = var_page.get("endCursor")
+
+        prod_page = products_data.get("pageInfo", {})
+        has_next_products = prod_page.get("hasNextPage", False)
+        product_cursor = prod_page.get("endCursor")
 
     return scanned_items
 
+def send_discord_alert(new_low_stock, restocked):
+    if not DISCORD_WEBHOOK_URL:
+        print("No DISCORD_WEBHOOK_URL set. Skipping notification.")
+        return
+
+    fields = []
+    
+    if new_low_stock:
+        desc = "\n".join([f"• **{item['variant_id']}** - {item['colour_name']} / {item['size_name']} (`{item['stock_count']}` left)" for item in new_low_stock[:15]])
+        if len(new_low_stock) > 15:
+            desc += f"\n*...and {len(new_low_stock) - 15} more*"
+        fields.append({
+            "name": "🔻 New Low Stock Alerts (< 25)",
+            "value": desc,
+            "inline": False
+        })
+
+    if restocked:
+        desc = "\n".join([f"• **{item['variant_id']}** - {item['colour_name']} / {item['size_name']} (Now `{item['stock_count']}`)" for item in restocked[:15]])
+        if len(restocked) > 15:
+            desc += f"\n*...and {len(restocked) - 15} more*"
+        fields.append({
+            "name": "🟢 Restocked Items (>= 25)",
+            "value": desc,
+            "inline": False
+        })
+
+    if not fields:
+        print("No 24h inventory changes to notify.")
+        return
+
+    payload = {
+        "username": "AS Colour Inventory Bot",
+        "embeds": [{
+            "title": "📦 Daily Inventory Status Update (Past 24 Hours)",
+            "color": 15158332 if new_low_stock else 3066993,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+
+    res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    if res.status_code in [200, 204]:
+        print("Discord alert delivered successfully.")
+    else:
+        print(f"Failed to send Discord alert: {res.status_code} - {res.text}")
+
 def main():
-    print("Starting target style inventory scan...")
     scanned_items = fetch_monitored_inventory()
-    print(f"Scanned {len(scanned_items)} variants matching target style list.")
-    
-    low_stock_payload = []
-    
-    for item in scanned_items:
-        base_sku = item["base_sku"]
-        colour = item["colour_name"]
-        size = item["size_name"]
-        stock = item["stock_count"]
-        
-        if stock >= 25:
-            # Delete/clean up restocked items from Supabase
-            supabase.table("inventory_states").delete().match({
-                "variant_id": base_sku,
-                "colour_name": colour,
-                "size_name": size
-            }).execute()
-        else:
-            # Collect low-stock items (< 25)
-            low_stock_payload.append({
-                "variant_id": base_sku,
+    print(f"Scanned {len(scanned_items)} variants from API.")
+
+    # Fetch current DB state
+    existing_records = supabase.table("inventory_states").select("*").execute().data
+    db_map = {(r["variant_id"], r["colour_name"], r["size_name"]): r for r in existing_records}
+
+    new_low_stock = []
+    restocked = []
+    upsert_payload = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for (style, colour, size), current_stock in scanned_items.items():
+        db_item = db_map.get((style, colour, size))
+        prev_stock = db_item.get("stock_count") if db_item else None
+
+        # Condition 1: Newly dropped below 25
+        if current_stock < 25:
+            if prev_stock is None or prev_stock >= 25:
+                new_low_stock.append({
+                    "variant_id": style, "colour_name": colour, "size_name": size, "stock_count": current_stock
+                })
+            
+            upsert_payload.append({
+                "variant_id": style,
                 "colour_name": colour,
                 "size_name": size,
-                "stock_count": stock,
+                "stock_count": current_stock,
+                "previous_stock_count": prev_stock,
                 "is_below_25": True,
-                "updated_in_deconetwork": False
+                "updated_in_deconetwork": False,
+                "last_changed_at": now_iso
             })
-            
-    if low_stock_payload:
-        supabase.table("inventory_states").upsert(low_stock_payload).execute()
-        print(f"Synced {len(low_stock_payload)} low-stock items across target styles to Supabase.")
-    else:
-        print("No low-stock items (< 25) found among monitored styles.")
+
+        # Condition 2: Restocked to 25+ from low stock
+        elif current_stock >= 25 and db_item and db_item.get("is_below_25"):
+            restocked.append({
+                "variant_id": style, "colour_name": colour, "size_name": size, "stock_count": current_stock
+            })
+            # Remove restocked item from low-stock dashboard
+            supabase.table("inventory_states").delete().match({
+                "variant_id": style, "colour_name": colour, "size_name": size
+            }).execute()
+
+    # Save low-stock items to Supabase
+    if upsert_payload:
+        supabase.table("inventory_states").upsert(upsert_payload).execute()
+
+    # Send consolidated 24h Discord alert
+    send_discord_alert(new_low_stock, restocked)
 
 if __name__ == "__main__":
     main()
