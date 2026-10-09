@@ -1,8 +1,9 @@
-name: Daily Inventory Tracker
+name: AS Colour Inventory Tracker
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # Runs at 6:00 AM Philippine Time (22:00 UTC)
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,20 +11,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install requests supabase
 
-      - name: Run python tracker.py
+      - name: Run Tracker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          AS_COLOUR_GRAPHQL_URL: "https://www.ascolour.com.au/graphql"
-          AS_COLOUR_API_TOKEN: "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJjaWQiOlsxXSwiY29ycyI6WyJodHRwczovL3d3dy5hc2NvbG91ci5jb20uYXUiXSwiZWF0IjoxNzkxNjEzMDA4LCJpYXQiOjE3OTE0NDAyMDgsImlzcyI6IkJDIiwic2lkIjoxMDAxMDIxMDY2LCJzdWIiOiJCQyIsInN1Yl90eXBlIjowLCJ0b2tlbl90eXBlIjoxfQ.NhCqD_4XxEghb8XUs3wFraU3OnTR_SNfKXZapWEFdu5NZnz9BAnKEb8o9p5VOz6p6QV7tgVWu9vVLX8bx9l8Cw"
+          AS_COLOUR_GRAPHQL_URL: ${{ secrets.AS_COLOUR_GRAPHQL_URL }}
+          AS_COLOUR_API_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python tracker.py
