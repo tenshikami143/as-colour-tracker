@@ -63,22 +63,22 @@ def fetch_product_inventory():
             v_node = edge["node"]
             
             inv = v_node.get("inventory", {})
-            sku = v_node.get("sku", "UNKNOWN-SKU")
+            full_sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # Parse SKU (e.g., '1001-BLACK-P-OS') into clean component variables
-            sku_parts = sku.split("-")
+            # Parse full SKU (e.g., '1000-BLACK-P-OS')
+            sku_parts = full_sku.split("-")
+            base_sku = sku_parts[0] if len(sku_parts) > 0 else full_sku
             colour = sku_parts[1] if len(sku_parts) > 1 else "UNKNOWN"
             size = "-".join(sku_parts[2:]) if len(sku_parts) > 2 else "OS"
             
-            # Placeholder for hidden/high stock levels during testing
-            stock_qty = 500 
+            stock_qty = 999 
             if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
                 
-            # TEST THRESHOLD: Set to 1000 to update test rows
-            if stock_qty < 1000:
+            if stock_qty < 25:
                 low_stock_items.append({
-                    "sku": sku,
+                    "full_sku": full_sku,
+                    "base_sku": base_sku,
                     "colour_name": colour,
                     "size_name": size,
                     "product_title": product_title,
@@ -88,37 +88,45 @@ def fetch_product_inventory():
     return low_stock_items
 
 def main():
-    print("Starting AS Colour inventory scan (TEST MODE)...")
+    print("Starting AS Colour inventory scan (PRODUCTION)...")
     low_stock_items = fetch_product_inventory()
-    print(f"Found {len(low_stock_items)} items to sync.")
+    print(f"Found {len(low_stock_items)} items below threshold (< 25).")
     
     for item in low_stock_items:
-        sku = item["sku"]
+        full_sku = item["full_sku"]
+        base_sku = item["base_sku"]
         colour = item["colour_name"]
         size = item["size_name"]
         stock = item["stock_count"]
         
-        # Query using full SKU so each variant maps 1:1 to its database row
-        existing = supabase.table("inventory_states").select("*").eq("variant_id", sku).execute()
+        # Match using full SKU to locate the exact row in Supabase
+        existing = supabase.table("inventory_states").select("*").eq("variant_id", full_sku).execute()
         existing_records = existing.data
         
-        if not existing_records:
-            supabase.table("inventory_states").insert({
-                "variant_id": sku,
-                "colour_name": colour,
-                "size_name": size, 
-                "stock_count": stock,
-                "is_below_25": True,
-                "updated_in_deconetwork": False
-            }).execute()
-            print(f"Inserted item to Supabase: {sku} ({colour} / {size})")
+        if stock >= 25:
+            if existing_records:
+                supabase.table("inventory_states").delete().eq("variant_id", full_sku).execute()
+                print(f"Restocked & removed from Supabase: {full_sku}")
         else:
-            supabase.table("inventory_states").update({
-                "colour_name": colour,
-                "size_name": size,
-                "stock_count": stock
-            }).eq("variant_id", sku).execute()
-            print(f"Updated item in Supabase: {sku} (Stock: {stock})")
+            if not existing_records:
+                supabase.table("inventory_states").insert({
+                    "variant_id": base_sku,  # Now stores only base style number (e.g., '1000')
+                    "colour_name": colour,
+                    "size_name": size, 
+                    "stock_count": stock,
+                    "is_below_25": True,
+                    "updated_in_deconetwork": False
+                }).execute()
+                print(f"Added low-stock item to Supabase: {base_sku} ({colour} / {size})")
+            else:
+                # Update existing row and overwrite variant_id with clean base SKU
+                supabase.table("inventory_states").update({
+                    "variant_id": base_sku,  # Overwrites '1000-BLACK-P-OS' with '1000'
+                    "colour_name": colour,
+                    "size_name": size,
+                    "stock_count": stock
+                }).eq("variant_id", full_sku).execute()
+                print(f"Updated low-stock item in Supabase: {base_sku} ({colour} / {size})")
 
 if __name__ == "__main__":
     main()
