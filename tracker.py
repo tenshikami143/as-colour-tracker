@@ -17,7 +17,6 @@ def fetch_product_inventory():
         "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
     }
     
-    # Updated GraphQL query matching BigCommerce field naming ('name' instead of 'title')
     query = """
     {
       site {
@@ -66,15 +65,15 @@ def fetch_product_inventory():
             inv = v_node.get("inventory", {})
             sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # DEBUG: Print raw inventory data to verify stock count values
-            print(f"DEBUG Variant {sku}: inventory object = {inv}")
-            
-            stock_qty = 0
-            if inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
+            # BigCommerce hides stock for items above threshold, returning None.
+            # Treat None as a safe high stock level (e.g., 999), otherwise parse the actual count.
+            stock_qty = 999 
+            if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
                 
-            # If stock is below your threshold (e.g., 25)
+            # If stock is genuinely below 25, catch it
             if stock_qty < 25:
+                print(f"LOW STOCK DETECTED -> Variant {sku}: {stock_qty} units available")
                 low_stock_items.append({
                     "variant_id": v_node.get("id"),
                     "sku": sku,
@@ -99,14 +98,11 @@ def main():
         existing_records = existing.data
         
         if stock >= 25:
-            # If restocked, remove it from the table (self-cleaning)
             if existing_records:
                 supabase.table("inventory_states").delete().eq("variant_id", variant_id).execute()
                 print(f"Restocked & removed from Supabase: {item['sku']}")
         else:
-            # Low stock or out of stock item
             if not existing_records:
-                # Insert new low-stock record
                 supabase.table("inventory_states").insert({
                     "variant_id": variant_id,
                     "colour_name": item["display_name"],
@@ -117,7 +113,6 @@ def main():
                 }).execute()
                 print(f"Added new low-stock item to Supabase: {item['sku']} (Stock: {stock})")
             else:
-                # Update stock count if it changed
                 supabase.table("inventory_states").update({
                     "stock_count": stock
                 }).eq("variant_id", variant_id).execute()
