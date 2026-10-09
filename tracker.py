@@ -1,6 +1,7 @@
 import os
+import random
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from supabase import create_client, Client
 
 # Initialize Supabase credentials
@@ -69,13 +70,13 @@ def fetch_monitored_inventory():
     }
     """
 
-    print("Fetching catalog data from AS Colour...")
+    print(f"Fetching catalog data for {len(TARGET_STYLES)} target styles...")
 
     while has_next_products:
         variables = {"productCursor": product_cursor, "variantCursor": None}
         response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code != 200:
-            print(f"API Error: {response.status_code}")
+            print(f"API Error: {response.status_code} - {response.text}")
             break
 
         products_data = response.json().get("data", {}).get("site", {}).get("products", {})
@@ -89,10 +90,12 @@ def fetch_monitored_inventory():
                 if variant_cursor:
                     var_vars = {"productCursor": product_cursor, "variantCursor": variant_cursor}
                     v_res = requests.post(GRAPHQL_URL, json={"query": query, "variables": var_vars}, headers=headers)
-                    if v_res.status_code != 200: break
+                    if v_res.status_code != 200: 
+                        break
                     p_edges = v_res.json().get("data", {}).get("site", {}).get("products", {}).get("edges", [])
                     target_p = next((p["node"] for p in p_edges if p["node"]["id"] == product_node["id"]), None)
-                    if not target_p: break
+                    if not target_p: 
+                        break
                     variants_data = target_p.get("variants", {})
                 else:
                     variants_data = product_node.get("variants", {})
@@ -104,6 +107,7 @@ def fetch_monitored_inventory():
                     
                     base_sku = full_sku.split("-")[0].upper() if "-" in full_sku else full_sku.upper()
                     
+                    # Filter out non-monitored styles
                     if base_sku.lower() not in [s.lower() for s in TARGET_STYLES]:
                         continue
                     
@@ -114,8 +118,15 @@ def fetch_monitored_inventory():
                         vals = opt_node.get("values", {}).get("edges", [])
                         if vals:
                             label = vals[0].get("node", {}).get("label", "")
-                            if "color" in opt_name or "colour" in opt_name: colour = label
-                            elif "size" in opt_name: size = label
+                            if "color" in opt_name or "colour" in opt_name: 
+                                colour = label
+                            elif "size" in opt_name: 
+                                size = label
+
+                    if colour == "UNKNOWN" and "-" in full_sku:
+                        parts = full_sku.split("-")
+                        colour = parts[1] if len(parts) > 1 else "UNKNOWN"
+                        size = "-".join(parts[2:]) if len(parts) > 2 else size
 
                     stock_qty = 999 
                     if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
@@ -136,7 +147,7 @@ def fetch_monitored_inventory():
 
 def send_discord_alert(new_low_stock, restocked):
     if not DISCORD_WEBHOOK_URL:
-        print("No DISCORD_WEBHOOK_URL set. Skipping notification.")
+        print("No DISCORD_WEBHOOK_URL configured. Skipping Discord alert.")
         return
 
     fields = []
@@ -161,19 +172,36 @@ def send_discord_alert(new_low_stock, restocked):
             "inline": False
         })
 
-    if not fields:
-        print("No 24h inventory changes to notify.")
-        return
-
-    payload = {
-        "username": "AS Colour Inventory Bot",
-        "embeds": [{
-            "title": "📦 Daily Inventory Status Update (Past 24 Hours)",
-            "color": 15158332 if new_low_stock else 3066993,
-            "fields": fields,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }]
-    }
+    # Actionable alerts (Low stock or Restocks found)
+    if fields:
+        payload = {
+            "username": "AS Colour Inventory Bot",
+            "embeds": [{
+                "title": "📦 Daily Inventory Status Update (Past 24 Hours)",
+                "color": 15158332 if new_low_stock else 3066993,
+                "fields": fields,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }]
+        }
+    # No changes found - send fun cheerful notification
+    else:
+        fun_messages = [
+            "☀️ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
+            "✨ **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
+            "🎉 **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
+            "🏖️ **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. ☀️",
+            "🤖 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎"
+        ]
+        
+        payload = {
+            "username": "AS Colour Inventory Bot",
+            "embeds": [{
+                "title": "✅ Daily Inventory Check: All Quiet!",
+                "description": random.choice(fun_messages),
+                "color": 3447003,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }]
+        }
 
     res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if res.status_code in [200, 204]:
@@ -183,9 +211,9 @@ def send_discord_alert(new_low_stock, restocked):
 
 def main():
     scanned_items = fetch_monitored_inventory()
-    print(f"Scanned {len(scanned_items)} variants from API.")
+    print(f"Scanned {len(scanned_items)} target variants from API.")
 
-    # Fetch current DB state
+    # Retrieve active DB records
     existing_records = supabase.table("inventory_states").select("*").execute().data
     db_map = {(r["variant_id"], r["colour_name"], r["size_name"]): r for r in existing_records}
 
@@ -198,7 +226,7 @@ def main():
         db_item = db_map.get((style, colour, size))
         prev_stock = db_item.get("stock_count") if db_item else None
 
-        # Condition 1: Newly dropped below 25
+        # Newly dropped below 25
         if current_stock < 25:
             if prev_stock is None or prev_stock >= 25:
                 new_low_stock.append({
@@ -216,21 +244,23 @@ def main():
                 "last_changed_at": now_iso
             })
 
-        # Condition 2: Restocked to 25+ from low stock
+        # Restocked to 25+ from low stock state
         elif current_stock >= 25 and db_item and db_item.get("is_below_25"):
             restocked.append({
                 "variant_id": style, "colour_name": colour, "size_name": size, "stock_count": current_stock
             })
-            # Remove restocked item from low-stock dashboard
+            # Clean up restocked item from Supabase
             supabase.table("inventory_states").delete().match({
-                "variant_id": style, "colour_name": colour, "size_name": size
+                "variant_id": style,
+                "colour_name": colour,
+                "size_name": size
             }).execute()
 
-    # Save low-stock items to Supabase
+    # Sync remaining low-stock items
     if upsert_payload:
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
-    # Send consolidated 24h Discord alert
+    # Send Discord notification (Digest or Fun All-Clear Ping)
     send_discord_alert(new_low_stock, restocked)
 
 if __name__ == "__main__":
