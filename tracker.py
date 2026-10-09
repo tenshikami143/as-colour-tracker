@@ -259,7 +259,7 @@ def process_inventory():
                         "colour_name": colour,
                         "size_name": size,
                         "stock_count": stock,
-                        "is_below_25": True
+                        "is_below_25": True,
                         "updated_in_deconetwork": False
                     }).execute()
                     send_alert(f"⚠️ **LOW STOCK ALERT**: {title} (`{variant_id}`) - **{colour} / {size}** has only **{stock}** units left!")
