@@ -154,10 +154,12 @@ def sync_inventory_and_alert():
         stock = item_data["stock"]
         prev_data = previous_states.get(sku)
         is_low = stock < 25
-        was_low = prev_data.get("is_below_25", False) if prev_data else False
 
-        if is_low and (not was_low or (prev_data and prev_data.get("stock_count") != stock)):
-            alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']}) -> Stock: **{stock}** units")
+        # Only trigger an alert if we have a previous baseline state recorded
+        if prev_data is not None:
+            was_low = prev_data.get("is_below_25", False)
+            if is_low and (not was_low or prev_data.get("stock_count") != stock):
+                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']}) -> Stock: **{stock}** units")
 
         upsert_payload.append({
             "variant_id": sku,
@@ -177,6 +179,7 @@ def sync_inventory_and_alert():
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk})
             print(f"Sent {len(alerts)} alert(s) to Discord.")
         else:
+            # No changes or first-run baseline established - send fun cheerful notification
             fun_messages = [
                 "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
                 "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
@@ -205,7 +208,7 @@ def sync_inventory_and_alert():
                 "🪄 **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
                 "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
                 "🖼️ **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
-                "⚡ **Fully Charged:** Stock levels across all monitored items are looking super healthy today! ⚡",
+                "⚡ **Fully Charged:** Stock counts across all monitored items are looking super healthy today! ⚡",
                 "🏅 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🏅",
                 "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
                 "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
