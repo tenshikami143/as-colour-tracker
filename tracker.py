@@ -65,15 +65,13 @@ def fetch_product_inventory():
             inv = v_node.get("inventory", {})
             sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # BigCommerce hides stock for items above threshold, returning None.
-            # Treat None as a safe high stock level (e.g., 999), otherwise parse the actual count.
             stock_qty = 999 
             if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
                 
-            # If stock is genuinely below 25, catch it
-            if stock_qty < 25:
-                print(f"LOW STOCK DETECTED -> Variant {sku}: {stock_qty} units available")
+            # TEMPORARY TEST THRESHOLD: Set to 1000 to catch items and test Supabase insertion
+            if stock_qty < 1000:
+                print(f"TEST MATCH -> Variant {sku}: {stock_qty} units available")
                 low_stock_items.append({
                     "variant_id": v_node.get("id"),
                     "sku": sku,
@@ -85,9 +83,9 @@ def fetch_product_inventory():
     return low_stock_items
 
 def main():
-    print("Starting AS Colour inventory scan...")
+    print("Starting AS Colour inventory scan (TEST MODE)...")
     low_stock_items = fetch_product_inventory()
-    print(f"Found {len(low_stock_items)} items below threshold.")
+    print(f"Found {len(low_stock_items)} items for test insertion.")
     
     for item in low_stock_items:
         variant_id = item["variant_id"]
@@ -97,25 +95,21 @@ def main():
         existing = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
         existing_records = existing.data
         
-        if stock >= 25:
-            if existing_records:
-                supabase.table("inventory_states").delete().eq("variant_id", variant_id).execute()
-                print(f"Restocked & removed from Supabase: {item['sku']}")
+        if not existing_records:
+            supabase.table("inventory_states").insert({
+                "variant_id": variant_id,
+                "colour_name": item["display_name"],
+                "size_name": "", 
+                "stock_count": stock,
+                "is_below_25": True,
+                "updated_in_deconetwork": False
+            }).execute()
+            print(f"Inserted test item to Supabase: {item['sku']} (Stock: {stock})")
         else:
-            if not existing_records:
-                supabase.table("inventory_states").insert({
-                    "variant_id": variant_id,
-                    "colour_name": item["display_name"],
-                    "size_name": "", 
-                    "stock_count": stock,
-                    "is_below_25": True,
-                    "updated_in_deconetwork": False
-                }).execute()
-                print(f"Added new low-stock item to Supabase: {item['sku']} (Stock: {stock})")
-            else:
-                supabase.table("inventory_states").update({
-                    "stock_count": stock
-                }).eq("variant_id", variant_id).execute()
+            supabase.table("inventory_states").update({
+                "stock_count": stock
+            }).eq("variant_id", variant_id).execute()
+            print(f"Updated test item in Supabase: {item['sku']}")
 
 if __name__ == "__main__":
     main()
