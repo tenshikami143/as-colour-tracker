@@ -17,6 +17,7 @@ def fetch_product_inventory():
         "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
     }
     
+    # Query variant options to extract full Color and Size display names
     query = """
     {
       site {
@@ -30,6 +31,20 @@ def fetch_product_inventory():
                   node {
                     id
                     sku
+                    options {
+                      edges {
+                        node {
+                          displayName
+                          values {
+                            edges {
+                              node {
+                                label
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
                     inventory {
                       aggregated {
                         availableToSell
@@ -65,13 +80,32 @@ def fetch_product_inventory():
             inv = v_node.get("inventory", {})
             full_sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # Parse SKU into base style number, colour, and size
-            sku_parts = full_sku.split("-")
-            base_sku = sku_parts[0] if len(sku_parts) > 0 else full_sku
-            colour = sku_parts[1] if len(sku_parts) > 1 else "UNKNOWN"
-            size = "-".join(sku_parts[2:]) if len(sku_parts) > 2 else "OS"
+            # Base style number from SKU prefix (e.g., '1001')
+            base_sku = full_sku.split("-")[0] if "-" in full_sku else full_sku
             
-            # Default to 999 when stock is high/hidden by BigCommerce
+            # Extract full Color and Size labels from variant options
+            colour = "UNKNOWN"
+            size = "OS"
+            
+            for option_edge in v_node.get("options", {}).get("edges", []):
+                opt_node = option_edge["node"]
+                opt_name = opt_node.get("displayName", "").lower()
+                
+                # Grab option values
+                vals = opt_node.get("values", {}).get("edges", [])
+                if vals:
+                    val_label = vals[0]["node"].get("label", "")
+                    if "color" in opt_name or "colour" in opt_name:
+                        colour = val_label
+                    elif "size" in opt_name:
+                        size = val_label
+                        
+            # Fallback to SKU parsing if options array isn't returned
+            if colour == "UNKNOWN" and "-" in full_sku:
+                parts = full_sku.split("-")
+                colour = parts[1] if len(parts) > 1 else "UNKNOWN"
+                size = "-".join(parts[2:]) if len(parts) > 2 else size
+
             stock_qty = 999 
             if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
@@ -99,23 +133,20 @@ def main():
         size = item["size_name"]
         stock = item["stock_count"]
         
-        # Check if row exists under full SKU (e.g. 1000-BLACK-P-OS) OR base SKU (e.g. 1000)
+        # Check existing records in Supabase
         existing_full = supabase.table("inventory_states").select("*").eq("variant_id", full_sku).execute().data
         existing_base = supabase.table("inventory_states").select("*").eq("variant_id", base_sku).execute().data
-        
         existing_records = existing_full or existing_base
         
         if stock >= 25:
-            # If item is well-stocked and exists in low-stock tracking, clean it up
             if existing_records:
                 target_id = full_sku if existing_full else base_sku
                 supabase.table("inventory_states").delete().eq("variant_id", target_id).execute()
                 print(f"Restocked & removed from Supabase: {target_id}")
         else:
-            # Low stock (< 25)
             if not existing_records:
                 supabase.table("inventory_states").insert({
-                    "variant_id": base_sku,  # Only base style number (e.g. '1000')
+                    "variant_id": base_sku,
                     "colour_name": colour,
                     "size_name": size, 
                     "stock_count": stock,
@@ -126,12 +157,12 @@ def main():
             else:
                 target_id = full_sku if existing_full else base_sku
                 supabase.table("inventory_states").update({
-                    "variant_id": base_sku,  # Overwrites '1000-BLACK-P-OS' to '1000'
+                    "variant_id": base_sku,
                     "colour_name": colour,
                     "size_name": size,
                     "stock_count": stock
                 }).eq("variant_id", target_id).execute()
-                print(f"Updated low-stock item in Supabase: {base_sku} ({colour} / {size})")
+                print(f"Updated item in Supabase with full color name: {base_sku} ({colour} / {size})")
 
 if __name__ == "__main__":
     main()
