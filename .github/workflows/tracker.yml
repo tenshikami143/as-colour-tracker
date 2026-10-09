@@ -24,6 +24,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          AS_COLOUR_GRAPHQL_URL: ${{ secrets.AS_COLOUR_GRAPHQL_URL }}  # Make sure this secret exists, or replace it with your actual URL string
+          AS_COLOUR_GRAPHQL_URL: https://www.ascolour.com.au/graphql  # Make sure this secret exists, or replace it with your actual URL string
           AS_COLOUR_API_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}     # Maps your ASCOLOUR_GRAPHQL_TOKEN secret to the script's variable
         run: python tracker.py
