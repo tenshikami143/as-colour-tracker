@@ -17,23 +17,25 @@ def fetch_product_inventory():
         "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
     }
     
-    # GraphQL query using first: 250 to ensure full variant catalog coverage
+    # GraphQL query wrapped in 'site' with pagination limits set to 50 max
     query = """
     {
-      products(first: 75) {
-        edges {
-          node {
-            id
-            title
-            variants(first: 250) {
-              edges {
-                node {
-                  id
-                  sku
-                  displayName
-                  inventory {
-                    aggregated {
-                      availableToSell
+      site {
+        products(first: 50) {
+          edges {
+            node {
+              id
+              title
+              variants(first: 50) {
+                edges {
+                  node {
+                    id
+                    sku
+                    displayName
+                    inventory {
+                      aggregated {
+                        availableToSell
+                      }
                     }
                   }
                 }
@@ -51,7 +53,8 @@ def fetch_product_inventory():
         return []
         
     data = response.json()
-    products = data.get("data", {}).get("products", {}).get("edges", [])
+    # Updated path with the BigCommerce 'site' wrapper layer
+    products = data.get("data", {}).get("site", {}).get("products", {}).get("edges", [])
     
     low_stock_items = []
     
@@ -73,7 +76,6 @@ def fetch_product_inventory():
                 
             # If stock is below your threshold (e.g., 25)
             if stock_qty < 25:
-                # Parse title or display name into colour/size if applicable
                 display_name = v_node.get("displayName", "")
                 
                 low_stock_items.append({
