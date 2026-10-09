@@ -20,10 +20,10 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-     - name: Run python tracker.py
+      - name: Run python tracker.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          AS_COLOUR_GRAPHQL_URL: https://www.ascolour.com.au/graphql  # Make sure this secret exists, or replace it with your actual URL string
-          AS_COLOUR_API_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}     # Maps your ASCOLOUR_GRAPHQL_TOKEN secret to the script's variable
+          AS_COLOUR_GRAPHQL_URL: "https://www.ascolour.com.au/graphql"
+          AS_COLOUR_API_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
         run: python tracker.py
