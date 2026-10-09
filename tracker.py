@@ -9,8 +9,8 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour GraphQL API credentials with safety fallback
-GRAPHQL_URL = os.environ.get("AS_COLOUR_GRAPHQL_URL") or "https://www.ascolour.com/api/storefront/graphql"
+# AS Colour GraphQL API credentials
+GRAPHQL_URL = "https://www.ascolour.com/graphql"
 API_TOKEN = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
 # Discord Webhook
