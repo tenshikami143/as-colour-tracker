@@ -2,7 +2,7 @@ name: AS Colour Inventory Tracker
 
 on:
   schedule:
-    # Runs at 6:00 AM Philippine Time (22:00 UTC)
+    # Runs daily at 6:00 AM Philippine Standard Time (22:00 UTC)
     - cron: '0 22 * * *'
   workflow_dispatch:
 
