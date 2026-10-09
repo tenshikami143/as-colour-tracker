@@ -17,7 +17,7 @@ def fetch_product_inventory():
         "Authorization": f"Bearer {API_TOKEN}" if API_TOKEN else ""
     }
     
-    # GraphQL query wrapped in 'site' with pagination limits set to 50 max
+    # Updated GraphQL query matching BigCommerce field naming ('name' instead of 'title')
     query = """
     {
       site {
@@ -25,13 +25,12 @@ def fetch_product_inventory():
           edges {
             node {
               id
-              title
+              name
               variants(first: 50) {
                 edges {
                   node {
                     id
                     sku
-                    displayName
                     inventory {
                       aggregated {
                         availableToSell
@@ -53,22 +52,22 @@ def fetch_product_inventory():
         return []
         
     data = response.json()
-    # Updated path with the BigCommerce 'site' wrapper layer
     products = data.get("data", {}).get("site", {}).get("products", {}).get("edges", [])
     
     low_stock_items = []
     
     for product_edge in products:
         product_node = product_edge["node"]
-        product_title = product_node.get("title")
+        product_title = product_node.get("name")
         
         for edge in product_node.get("variants", {}).get("edges", []):
             v_node = edge["node"]
             
             inv = v_node.get("inventory", {})
+            sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # DEBUG: Print raw inventory data to check what the API returns
-            print(f"DEBUG Variant {v_node.get('sku')}: inventory object = {inv}")
+            # DEBUG: Print raw inventory data to verify stock count values
+            print(f"DEBUG Variant {sku}: inventory object = {inv}")
             
             stock_qty = 0
             if inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
@@ -76,13 +75,11 @@ def fetch_product_inventory():
                 
             # If stock is below your threshold (e.g., 25)
             if stock_qty < 25:
-                display_name = v_node.get("displayName", "")
-                
                 low_stock_items.append({
                     "variant_id": v_node.get("id"),
-                    "sku": v_node.get("sku"),
+                    "sku": sku,
                     "product_title": product_title,
-                    "display_name": display_name,
+                    "display_name": f"{product_title} ({sku})",
                     "stock_count": stock_qty
                 })
                 
