@@ -9,7 +9,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour GraphQL API credentials
+# AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
@@ -134,7 +134,7 @@ def fetch_monitored_inventory():
 
 
 def sync_inventory_and_alert():
-    print("Fetching catalog data for 73 target styles...")
+    print("Fetching catalog data for 73 target styles from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
@@ -166,7 +166,7 @@ def sync_inventory_and_alert():
             "updated_at": now_iso
         })
 
-    # Batch upsert matching Supabase columns[cite: 13]
+    # Batch upsert matching Supabase columns
     if upsert_payload:
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
