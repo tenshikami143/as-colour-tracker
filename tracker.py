@@ -65,18 +65,14 @@ def fetch_product_inventory():
             inv = v_node.get("inventory", {})
             sku = v_node.get("sku", "UNKNOWN-SKU")
             
-            # Check if BigCommerce returned an explicit stock count
+            # Use 500 as placeholder when stock is hidden/None
+            stock_qty = 500 
             if inv and inv.get("aggregated") and inv["aggregated"].get("availableToSell") is not None:
                 stock_qty = int(inv["aggregated"]["availableToSell"])
-            else:
-                # If None, stock is high/hidden. For testing, let's assign 500 so it's clearly non-zero.
-                stock_qty = 500 
                 
-            # TEMPORARY TEST THRESHOLD: Set to 1000 to catch items and test Supabase insertion
+            # TEMPORARY TEST THRESHOLD: Set to 1000 to update all rows
             if stock_qty < 1000:
-                print(f"TEST MATCH -> Variant {sku}: {stock_qty} units available")
                 low_stock_items.append({
-                    "variant_id": v_node.get("id"),
                     "sku": sku,
                     "product_title": product_title,
                     "display_name": f"{product_title} ({sku})",
@@ -88,31 +84,31 @@ def fetch_product_inventory():
 def main():
     print("Starting AS Colour inventory scan (TEST MODE)...")
     low_stock_items = fetch_product_inventory()
-    print(f"Found {len(low_stock_items)} items for test insertion.")
+    print(f"Found {len(low_stock_items)} items to sync.")
     
     for item in low_stock_items:
-        variant_id = item["variant_id"]
+        sku = item["sku"]
         stock = item["stock_count"]
         
-        # Check existing record in Supabase
-        existing = supabase.table("inventory_states").select("*").eq("variant_id", variant_id).execute()
+        # Check existing record in Supabase using the SKU as variant_id
+        existing = supabase.table("inventory_states").select("*").eq("variant_id", sku).execute()
         existing_records = existing.data
         
         if not existing_records:
             supabase.table("inventory_states").insert({
-                "variant_id": variant_id,
+                "variant_id": sku,  # Using SKU to match table structure
                 "colour_name": item["display_name"],
                 "size_name": "", 
                 "stock_count": stock,
                 "is_below_25": True,
                 "updated_in_deconetwork": False
             }).execute()
-            print(f"Inserted test item to Supabase: {item['sku']} (Stock: {stock})")
+            print(f"Inserted item to Supabase: {sku} (Stock: {stock})")
         else:
             supabase.table("inventory_states").update({
                 "stock_count": stock
-            }).eq("variant_id", variant_id).execute()
-            print(f"Updated test item in Supabase: {item['sku']} (Stock: {stock})")
+            }).eq("variant_id", sku).execute()
+            print(f"Updated item in Supabase: {sku} (Stock: {stock})")
 
 if __name__ == "__main__":
     main()
