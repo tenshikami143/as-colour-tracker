@@ -34,6 +34,16 @@ TARGET_STYLES = [
 ]
 
 
+def parse_sku_attributes(variant_sku):
+    # Parses '1000-BLACK-P-OS' into colour='BLACK', size='P-OS'
+    parts = variant_sku.split("-")
+    if len(parts) >= 3:
+        colour = parts[1]
+        size = "-".join(parts[2:])
+        return colour, size
+    return "N/A", "N/A"
+
+
 def fetch_monitored_inventory():
     headers = {
         "Content-Type": "application/json"
@@ -67,14 +77,6 @@ def fetch_monitored_inventory():
                   node {
                     id
                     sku
-                    selectedOptions {
-                      edges {
-                        node {
-                          name
-                          value
-                        }
-                      }
-                    }
                     inventory {
                       aggregated {
                         availableToSell
@@ -121,19 +123,7 @@ def fetch_monitored_inventory():
                         v_node = v_edge.get("node", {})
                         variant_sku = v_node.get("sku", "").strip()
                         
-                        # Extract color and size from selectedOptions safely
-                        colour = "N/A"
-                        size = "N/A"
-                        options_edges = v_node.get("selectedOptions", {}).get("edges", [])
-                        for opt_edge in options_edges:
-                            opt_node = opt_edge.get("node", {})
-                            name_lower = opt_node.get("name", "").lower()
-                            val = opt_node.get("value", "N/A")
-                            
-                            if "colour" in name_lower or "color" in name_lower:
-                                colour = val
-                            elif "size" in name_lower:
-                                size = val
+                        colour, size = parse_sku_attributes(variant_sku)
 
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
@@ -159,7 +149,7 @@ def fetch_monitored_inventory():
 
 
 def sync_inventory_and_alert():
-    print("Fetching catalog data with readable attributes from AS Colour Australia...")
+    print("Fetching catalog data with clean SKU attributes from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
