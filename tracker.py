@@ -34,7 +34,7 @@ def fetch_monitored_inventory():
         "Content-Type": "application/json"
     }
     if API_TOKEN:
-        headers["X-Auth-Token"] = API_TOKEN
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
 
     scanned_items = {}
     has_next_products = True
