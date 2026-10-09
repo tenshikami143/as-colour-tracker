@@ -11,7 +11,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # AS Colour GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com/graphql"
-API_TOKEN = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
+raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
+
+if raw_token and raw_token.lower().startswith("bearer "):
+    API_TOKEN = raw_token.split(" ", 1)[1].strip()
+else:
+    API_TOKEN = raw_token
 
 # Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -151,7 +156,6 @@ def sync_inventory_and_alert():
         is_low = stock < 25
         was_low = prev_data.get("is_low_stock", False) if prev_data else False
 
-        # Alert logic: trigger alert if stock dropped below 25 or changed while low
         if is_low and (not was_low or (prev_data and prev_data.get("stock_level") != stock)):
             alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']}) -> Stock: **{stock}** units")
 
@@ -164,11 +168,9 @@ def sync_inventory_and_alert():
             "last_updated": now_iso
         })
 
-    # Batch upsert to Supabase
     if upsert_payload:
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
-    # Dispatch alerts or send fun message to Discord
     if DISCORD_WEBHOOK_URL:
         if alerts:
             for i in range(0, len(alerts), 10):
@@ -176,7 +178,6 @@ def sync_inventory_and_alert():
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk})
             print(f"Sent {len(alerts)} alert(s) to Discord.")
         else:
-            # No changes found - send fun cheerful notification
             fun_messages = [
                 "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
                 "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
