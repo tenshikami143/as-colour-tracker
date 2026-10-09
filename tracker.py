@@ -10,7 +10,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # AS Colour GraphQL API credentials
-GRAPHQL_URL = "https://www.ascolour.com/graphql"
+GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
 if raw_token and raw_token.lower().startswith("bearer "):
