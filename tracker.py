@@ -10,7 +10,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # AS Colour GraphQL API credentials
-GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
+GRAPHQL_URL = "https://www.ascolour.com/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
 if raw_token and raw_token.lower().startswith("bearer "):
@@ -142,9 +142,9 @@ def sync_inventory_and_alert():
         print("No inventory data retrieved. Exiting.")
         return
 
-    # Fetch existing states from Supabase
+    # Fetch existing states from Supabase using variant_id
     response = supabase.table("inventory_states").select("*").execute()
-    previous_states = {item["sku"]: item for item in response.data} if response.data else {}
+    previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
 
     alerts = []
     upsert_payload = []
@@ -154,20 +154,19 @@ def sync_inventory_and_alert():
         stock = item_data["stock"]
         prev_data = previous_states.get(sku)
         is_low = stock < 25
-        was_low = prev_data.get("is_low_stock", False) if prev_data else False
+        was_low = prev_data.get("is_below_25", False) if prev_data else False
 
-        if is_low and (not was_low or (prev_data and prev_data.get("stock_level") != stock)):
+        if is_low and (not was_low or (prev_data and prev_data.get("stock_count") != stock)):
             alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']}) -> Stock: **{stock}** units")
 
         upsert_payload.append({
-            "sku": sku,
-            "style_sku": item_data["style_sku"],
-            "product_name": item_data["product_name"],
-            "stock_level": stock,
-            "is_low_stock": is_low,
-            "last_updated": now_iso
+            "variant_id": sku,
+            "stock_count": stock,
+            "is_below_25": is_low,
+            "updated_at": now_iso
         })
 
+    # Batch upsert matching Supabase columns[cite: 13]
     if upsert_payload:
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
