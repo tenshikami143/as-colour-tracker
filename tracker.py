@@ -11,33 +11,10 @@ st.title("Tee Junction Inventory Tracker")
 # 1. Robust Supabase Initialization (Supports flat secrets, nested [supabase] TOML, and env vars)
 @st.cache_resource
 def init_supabase():
-    url = None
-    key = None
+    # Bypassing secrets UI completely to end the headache
+    url = "https://awbfgsvwgeaunezzxyo.supabase.co"
+    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF3YmZnc3Z3Z2VhdW5lenp4eW8iLCJyb2xlIjoiYW5vbiIsImlhdCI6MTczNjk3OTU5MywiZXhwIjoyMDUyNTU1NTkzfQ.08kAof2IzEmBDi59-iPHQj0SATZwmiAoKsCbjESQq2k"
     
-    # Try flat Streamlit secrets first (SUPABASE_URL = "...")
-    try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-    except Exception:
-        pass
-        
-    # Try nested Streamlit secrets ([supabase] \n url = "...")
-    if not url or not key:
-        try:
-            url = st.secrets.get("supabase", {}).get("url")
-            key = st.secrets.get("supabase", {}).get("key")
-        except Exception:
-            pass
-        
-    # Fallback to environment variables (for GitHub Actions)
-    if not url:
-        url = os.environ.get("SUPABASE_URL")
-    if not key:
-        key = os.environ.get("SUPABASE_KEY")
-        
-    if not url or not key:
-        return None
-        
     return create_client(url, key)
 
 supabase = init_supabase()
