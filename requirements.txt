@@ -1,3 +1,5 @@
 requests
 supabase
 beautifulsoup4
+streamlit
+pandas
