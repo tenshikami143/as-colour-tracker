@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.title("AS Colour Inventory Tracker")
+st.title("Tee Junction Inventory Tracker")
 import os
 import random
 import requests
