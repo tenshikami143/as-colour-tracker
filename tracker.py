@@ -49,7 +49,7 @@ if supabase:
             col1.metric("Total Items Tracked", len(data))
             
             st.subheader("Current Stock Levels")
-            st.dataframe(data, use_container_width=True)
+            st.dataframe(data, width="stretch")
         else:
             st.info("Connected to Supabase, but no inventory records found in 'inventory_states'.")
     except Exception as e:
