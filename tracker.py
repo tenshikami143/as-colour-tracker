@@ -1,5 +1,7 @@
 import os
 import random
+import base64
+import json
 import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
@@ -93,6 +95,33 @@ def parse_sku_attributes(variant_sku):
         
         return colour, size
     return "N/A", "N/A"
+
+
+def check_token_expiration_and_alert():
+    if not API_TOKEN or not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        parts = API_TOKEN.split(".")
+        if len(parts) < 2:
+            return
+        payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_part).decode("utf-8"))
+        
+        eat = payload.get("eat")
+        if eat:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            days_left = (eat - now_ts) / 86400  # Convert seconds to days
+            
+            if days_left <= 0:
+                msg = "🚨 **MAYDAY! THE TOKEN HAS OFFICIALLY KICKED THE BUCKET!** 🪦 AS Colour has locked us out in the cold. Drop what you're doing, grab a fresh token, and slap it into GitHub Secrets before the tees revolt!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print("Alert sent: Token expired.")
+            elif days_left <= 5:
+                msg = f"⏳ **TICK-TOCK!** Your AS Colour token is aging like fine milk and expires in **{round(days_left, 1)} days**. Get ahead of the chaos and grab a fresh token before this ship hits the iceberg!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print(f"Alert sent: Token expires in {round(days_left, 1)} days.")
+    except Exception as e:
+        print(f"Error checking token expiration: {e}")
 
 
 def fetch_monitored_inventory():
@@ -200,12 +229,18 @@ def fetch_monitored_inventory():
 
 
 def sync_inventory_and_alert():
+    # Check token health first
+    check_token_expiration_and_alert()
+
     print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
     if not current_inventory:
-        print("No inventory data retrieved. Exiting.")
+        print("No inventory data retrieved. Sending scan failure alert.")
+        if DISCORD_WEBHOOK_URL:
+            fail_msg = "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* (0 items). Either AS Colour put up a firewall or ghosts stole the warehouse. Check your token/API immediately!"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": fail_msg})
         return
 
     response = supabase.table("inventory_states").select("*").execute()
