@@ -1,6 +1,51 @@
 import streamlit as st
 
 st.title("Tee Junction Inventory Tracker")
+import streamlit as st
+import os
+from supabase import create_client, Client
+
+st.title("Tee Junction Inventory Tracker")
+
+# 1. Initialize Supabase Connection using Streamlit Secrets or Environment Variables
+@st.cache_resource
+def init_supabase():
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        st.error("Supabase credentials missing!")
+        return None
+    return create_client(url, key)
+
+supabase = init_supabase()
+
+# 2. Fetch Inventory Data from Supabase
+@st.cache_data(ttl=60) # Caches data for 60 seconds
+def load_data():
+    if not supabase:
+        return []
+    # Replace 'inventory' with your exact Supabase table name
+    response = supabase.table("inventory").select("*").execute()
+    return response.data
+
+# 3. Display Dashboard Elements
+if supabase:
+    try:
+        data = load_data()
+        
+        if data:
+            # Top Summary Metrics
+            col1, col2 = st.columns(2)
+            col1.metric("Total Items Tracked", len(data))
+            
+            # Display Inventory Data Table
+            st.subheader("Current Stock Levels")
+            st.dataframe(data, use_container_width=True)
+        else:
+            st.info("Connected to Supabase, but no inventory data was found.")
+            
+    except Exception as e:
+        st.error(f"Error fetching data from Supabase: {e}")
 import os
 import random
 import requests
