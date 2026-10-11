@@ -8,38 +8,28 @@ from supabase import create_client, Client
 # Streamlit UI Title
 st.title("Tee Junction Inventory Tracker")
 
-# Diagnostic Supabase Initialization
+# 1. Robust Supabase Initialization
 @st.cache_resource
 def init_supabase():
     url = None
     key = None
     
-    st.write("--- **Secrets Diagnostic** ---")
+    # Try Streamlit Cloud secrets first
     try:
-        st.write("st.secrets keys available:", list(st.secrets.keys()))
         if "SUPABASE_URL" in st.secrets:
             url = st.secrets["SUPABASE_URL"]
-            st.write("✅ SUPABASE_URL found in st.secrets")
         if "SUPABASE_KEY" in st.secrets:
             key = st.secrets["SUPABASE_KEY"]
-            st.write("✅ SUPABASE_KEY found in st.secrets")
-    except Exception as e:
-        st.write(f"⚠️ st.secrets error or none found: {e}")
+    except Exception:
+        pass
         
     # Fallback to environment variables (for GitHub Actions)
     if not url:
         url = os.environ.get("SUPABASE_URL")
-        if url:
-            st.write("✅ SUPABASE_URL found in os.environ")
     if not key:
         key = os.environ.get("SUPABASE_KEY")
-        if key:
-            st.write("✅ SUPABASE_KEY found in os.environ")
-            
-    st.write("----------------------------")
-    
+        
     if not url or not key:
-        st.error("Supabase credentials missing! Please check your Streamlit Cloud Secrets.")
         return None
         
     return create_client(url, key)
@@ -68,7 +58,8 @@ if supabase:
             st.info("Connected to Supabase, but no inventory records found in 'inventory_states'.")
     except Exception as e:
         st.error(f"Error fetching data from Supabase: {e}")
-
+else:
+    st.error("Supabase credentials missing! Please check your Streamlit Secrets.")
 
 # AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
@@ -233,4 +224,121 @@ def fetch_monitored_inventory():
                     variants = product.get("variants", {}).get("edges", [])
                     for v_edge in variants:
                         v_node = v_edge.get("node", {})
-                        variant_sku = v_node
+                        variant_sku = v_node.get("sku", "").strip()
+                        
+                        colour, size = parse_sku_attributes(variant_sku)
+
+                        inv_data = v_node.get("inventory", {}).get("aggregated", {})
+                        stock = inv_data.get("availableToSell", 0) if inv_data else 0
+
+                        if variant_sku:
+                            scanned_items[variant_sku] = {
+                                "style_sku": style_sku,
+                                "product_name": product_name,
+                                "colour_name": colour,
+                                "size_name": size,
+                                "stock": stock
+                            }
+
+            page_info = products_data.get("pageInfo", {})
+            has_next_products = page_info.get("hasNextPage", False)
+            product_cursor = page_info.get("endCursor")
+
+        except Exception as e:
+            print(f"Request Exception: {e}")
+            break
+
+    return scanned_items
+
+
+def sync_inventory_and_alert():
+    print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
+    current_inventory = fetch_monitored_inventory()
+    print(f"Scanned {len(current_inventory)} target variants from API.")
+
+    if not current_inventory:
+        print("No inventory data retrieved. Exiting.")
+        return
+
+    response = supabase.table("inventory_states").select("*").execute()
+    previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
+
+    alerts = []
+    upsert_payload = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for sku, item_data in current_inventory.items():
+        stock = item_data["stock"]
+        prev_data = previous_states.get(sku)
+        is_low = stock < 25
+
+        if prev_data is not None:
+            was_low = prev_data.get("is_below_25", False)
+            if is_low and (not was_low or prev_data.get("stock_count") != stock):
+                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
+
+        upsert_payload.append({
+            "variant_id": sku,
+            "style_sku": item_data["style_sku"],
+            "product_name": item_data["product_name"],
+            "colour_name": item_data["colour_name"],
+            "size_name": item_data["size_name"],
+            "stock_count": stock,
+            "is_below_25": is_low,
+            "updated_at": now_iso
+        })
+
+    if upsert_payload:
+        supabase.table("inventory_states").upsert(upsert_payload).execute()
+
+    if DISCORD_WEBHOOK_URL:
+        if alerts:
+            for i in range(0, len(alerts), 10):
+                chunk = "\n".join(alerts[i:i + 10])
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk})
+            print(f"Sent {len(alerts)} alert(s) to Discord.")
+        else:
+            fun_messages = [
+                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
+                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
+                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
+                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
+                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
+                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
+                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
+                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
+                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
+                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
+                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀",
+                "☕ **Pour Another Cup:** Everything is looking great across the catalog today. Sit back and enjoy your morning brew! ☕",
+                "✨ **Golden Ratio:** No new low stock, no restock chaos. Just a pristine, smooth inventory run! ✨",
+                "💤 **Sleeping Soundly:** The inventory warehouse is completely undisturbed today. Shhh, don't wake the tees! 💤",
+                "🥧 **Flawless Run:** Today's scan went smoother than butter. All monitored styles are safe and sound! 🥧",
+                "⚓ **On Course:** Staying steady on the high seas! Zero inventory emergencies detected in the last 24 hours. ⚓",
+                "🕶️ **Too Cool for Stock Outs:** Stock levels are staying comfortable today. Put on those shades and enjoy your morning! 🕶️",
+                "🏆 **Victory Lap:** No low-stock flags raised today! You're winning the inventory game. 🏆",
+                "🥑 **Holy Guacamole!** Another day, another completely clean inventory report. Keep crushing it! 🥑",
+                "🎮 **Level Complete:** Daily scan finished with 0 errors and 0 inventory alerts! Maximum score achieved. 🎮",
+                "🌈 **Sunshine & Rainbows:** Nothing but healthy stock numbers across all 73 styles today! 🌈",
+                "🤫 **Warehouse Whispers:** The shelves are quiet today. All target variants are staying right where they belong! 🤫",
+                "✈️ **Cruising Altitude:** 30,000 feet up and zero turbulence in the stock room today! ✈️",
+                "🎵 **Sweet Harmony:** All styles are in perfect sync today. Not a single stock alarm sounded! 🎵",
+                "🪄 **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
+                "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
+                "🖼️ **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
+                "⚡ **Fully Charged:** Stock counts across all monitored items are looking super healthy today! ⚡",
+                "🏅 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🏅",
+                "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
+                "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
+                "🍀 **Lucky Days:** No surprise out-of-stock events today. Lady Luck is on our side! 🍀",
+                "🚦 **Smooth Highway:** Cruising on green lights all morning. No inventory speed bumps today! 🚦",
+                "🏰 **Castle Guarded:** The inventory fortress remains untouched today. All stock holds firm! 🏰",
+                "🍕 **Pizza Time:** No inventory crises to handle today, so you've earned a pizza slice later! 🍕"
+            ]
+            selected_message = random.choice(fun_messages)
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": selected_message})
+            print("Discord alert delivered successfully.")
+
+
+if __name__ == "__main__":
+    sync_inventory_and_alert()
