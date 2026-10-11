@@ -8,24 +8,29 @@ from supabase import create_client, Client
 # Streamlit UI Title
 st.title("Tee Junction Inventory Tracker")
 
-# 1. Robust Supabase Initialization (Supports both Streamlit Cloud secrets & GitHub Actions environment variables)
+# 1. Robust Supabase Initialization (Prioritizes Streamlit Cloud secrets first)
 @st.cache_resource
 def init_supabase():
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
+    url = None
+    key = None
     
+    # Try Streamlit Cloud secrets first
+    try:
+        if "SUPABASE_URL" in st.secrets:
+            url = st.secrets["SUPABASE_URL"]
+        if "SUPABASE_KEY" in st.secrets:
+            key = st.secrets["SUPABASE_KEY"]
+    except Exception:
+        pass
+        
+    # Fallback to environment variables (for GitHub Actions)
+    if not url:
+        url = os.environ.get("SUPABASE_URL")
+    if not key:
+        key = os.environ.get("SUPABASE_KEY")
+        
     if not url or not key:
-        try:
-            url = st.secrets.get("SUPABASE_URL")
-            key = st.secrets.get("SUPABASE_KEY")
-        except Exception:
-            pass
-            
-    if not url or not key:
-        try:
-            st.error("Supabase credentials missing!")
-        except Exception:
-            print("Error: Supabase credentials missing!")
+        st.error("Supabase credentials missing! Please check your Streamlit Secrets.")
         return None
         
     return create_client(url, key)
@@ -336,5 +341,4 @@ def sync_inventory_and_alert():
 
 
 if __name__ == "__main__":
-    # This runs when executed via GitHub Actions workflow (python tracker.py)
     sync_inventory_and_alert()
