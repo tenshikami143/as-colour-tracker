@@ -8,20 +8,26 @@ from supabase import create_client, Client
 # Streamlit UI Title
 st.title("Tee Junction Inventory Tracker")
 
-# 1. Robust Supabase Initialization
+# 1. Robust Supabase Initialization (Supports flat secrets, nested [supabase] TOML, and env vars)
 @st.cache_resource
 def init_supabase():
     url = None
     key = None
     
-    # Try Streamlit Cloud secrets first
+    # Try flat Streamlit secrets first (SUPABASE_URL = "...")
     try:
-        if "SUPABASE_URL" in st.secrets:
-            url = st.secrets["SUPABASE_URL"]
-        if "SUPABASE_KEY" in st.secrets:
-            key = st.secrets["SUPABASE_KEY"]
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
     except Exception:
         pass
+        
+    # Try nested Streamlit secrets ([supabase] \n url = "...")
+    if not url or not key:
+        try:
+            url = st.secrets.get("supabase", {}).get("url")
+            key = st.secrets.get("supabase", {}).get("key")
+        except Exception:
+            pass
         
     # Fallback to environment variables (for GitHub Actions)
     if not url:
