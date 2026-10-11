@@ -2,47 +2,12 @@ import os
 import random
 import requests
 from datetime import datetime, timezone
-import streamlit as st
 from supabase import create_client, Client
 
-# Streamlit UI Title
-st.title("Tee Junction Inventory Tracker")
-
-# 1. Robust Supabase Initialization (Supports flat secrets, nested [supabase] TOML, and env vars)
-@st.cache_resource
-def init_supabase():
-    # Bypassing secrets UI completely to end the headache
-    url = "https://awbfgsvwgeaunezzxyo.supabase.co"
-    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF3YmZnc3Z3Z2VhdW5lenp4eW8iLCJyb2xlIjoiYW5vbiIsImlhdCI6MTczNjk3OTU5MywiZXhwIjoyMDUyNTU1NTkzfQ.08kAof2IzEmBDi59-iPHQj0SATZwmiAoKsCbjESQq2k"
-    
-    return create_client(url, key)
-
-supabase = init_supabase()
-
-# 2. Fetch and Display Inventory Data on the Web Dashboard
-@st.cache_data(ttl=60)
-def load_web_data():
-    if not supabase:
-        return []
-    response = supabase.table("inventory_states").select("*").execute()
-    return response.data
-
-# Render Web Dashboard UI if running inside Streamlit
-if supabase:
-    try:
-        data = load_web_data()
-        if data:
-            col1, col2 = st.columns(2)
-            col1.metric("Total Items Tracked", len(data))
-            
-            st.subheader("Current Stock Levels")
-            st.dataframe(data, width="stretch")
-        else:
-            st.info("Connected to Supabase, but no inventory records found in 'inventory_states'.")
-    except Exception as e:
-        st.error(f"Error fetching data from Supabase: {e}")
-else:
-    st.error("Supabase credentials missing! Please check your Streamlit Secrets.")
+# Initialize Supabase credentials
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
