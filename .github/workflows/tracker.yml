@@ -28,4 +28,4 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ASCOLOUR_GRAPHQL_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python tracker.py
+        run: python mapper.py
