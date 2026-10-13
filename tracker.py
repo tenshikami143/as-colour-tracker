@@ -189,8 +189,9 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
+    # Fetch up to 250 variants per product to capture all colorways/sizes for large styles like 4001
     query = """
-    query FetchCatalog($productCursor: String,$variantCursor: String) {
+    query FetchCatalog($productCursor: String) {
       site {
         products(first: 50, after: $productCursor) {
           pageInfo {
@@ -202,7 +203,7 @@ def fetch_monitored_inventory():
               id
               name
               sku
-              variants(first: 50, after: $variantCursor) {
+              variants(first: 250) {
                 pageInfo {
                   hasNextPage
                   endCursor
@@ -228,8 +229,7 @@ def fetch_monitored_inventory():
 
     while has_next_products:
         variables = {
-            "productCursor": product_cursor,
-            "variantCursor": None
+            "productCursor": product_cursor
         }
 
         try:
