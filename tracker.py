@@ -27,8 +27,19 @@ STOCK_API_HEADERS = {
     "Accept": "application/json",
     "Origin": "https://www.ascolour.com.au",
     "Referer": "https://www.ascolour.com.au/",
+    "Store-Hash": "lqiq2tqil5",  # the header the site's csrf-protection script adds; without it the API returns []
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 }
+# Extra headers for the stock API as JSON, e.g. {"x-api-key": "..."} (put it in a GitHub secret)
+_extra_headers = os.environ.get("STOCK_API_EXTRA_HEADERS")
+if _extra_headers:
+    try:
+        STOCK_API_HEADERS.update(json.loads(_extra_headers))
+    except ValueError:
+        print("STOCK_API_EXTRA_HEADERS is not valid JSON - ignoring it.")
+
 STOCK_BATCH_SIZE = 10  # how many product IDs to request per call
 
 # Optional: hard-code {style_sku: product_id} to skip the GraphQL lookup (and the token) completely.
@@ -63,6 +74,7 @@ TARGET_STYLES = [
     "5101", "5102", "5102g", "5103", "5104", "5125", "5145", "5146", "5148", "5160",
     "5161", "5162", "5402"
 ]
+TARGET_LOWER = {style.lower(): style for style in TARGET_STYLES}
 
 # Translation dictionaries for cleaner readability
 COLOUR_MAP = {
@@ -301,8 +313,9 @@ def discover_product_ids():
             node = edge.get("node") or {}
             sku = (node.get("sku") or "").strip()
             entity_id = node.get("entityId")
-            if sku in TARGET_STYLES and entity_id:
-                found[sku] = entity_id
+            canonical = TARGET_LOWER.get(sku.lower())
+            if canonical and entity_id:
+                found[canonical] = entity_id
 
         page_info = products.get("pageInfo") or {}
         has_next = page_info.get("hasNextPage", False)
@@ -320,40 +333,40 @@ def fetch_stock_batch(product_ids, label=""):
     ids_param = ",".join(str(i) for i in product_ids)
     url = f"{STOCK_API_URL}?product_ids={ids_param}&customer_email="
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             response = requests.get(url, headers=STOCK_API_HEADERS, timeout=60)
         except Exception as e:
             print(f"Stock API request exception {label}: {e}")
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         if response.status_code != 200:
             print(f"Stock API error {label}: {response.status_code} - {response.text[:300]}")
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         try:
             data = response.json()
         except ValueError:
             print(f"Stock API returned non-JSON {label}: {response.text[:300]}")
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         if isinstance(data, list) and data:
             return data
 
-        print(f"Stock API returned an empty result {label} (attempt {attempt + 1}/3)")
-        time.sleep(2)
+        print(f"Stock API returned an empty result {label} (attempt {attempt + 1}/2)")
+        time.sleep(1)
 
     return None
 
 
 def collect_product(product, scanned_items, stats):
-    style_sku = (product.get("sku") or "").strip()
+    style_sku = TARGET_LOWER.get((product.get("sku") or "").strip().lower())
     product_name = (product.get("name") or "").strip()
 
-    if style_sku not in TARGET_STYLES:
+    if not style_sku:
         return
 
     stats["styles_found"].add(style_sku)
@@ -392,7 +405,7 @@ def collect_product(product, scanned_items, stats):
 
 def fetch_monitored_inventory():
     scanned_items = {}
-    stats = {"seen": 0, "no_data": 0, "debug_printed": 0, "styles_found": set(), "ids_ok": True}
+    stats = {"seen": 0, "no_data": 0, "debug_printed": 0, "styles_found": set(), "ids_ok": True, "api_empty": False}
 
     style_ids = dict(STYLE_PRODUCT_IDS)
     if not style_ids:
@@ -410,20 +423,29 @@ def fetch_monitored_inventory():
         print(f"No product ID found for styles: {', '.join(missing_ids)}")
 
     id_list = sorted(set(style_ids.values()))
+    failed_in_a_row = 0
     for i in range(0, len(id_list), STOCK_BATCH_SIZE):
         batch = id_list[i:i + STOCK_BATCH_SIZE]
         products = fetch_stock_batch(batch, label=f"(ids {batch[0]}..{batch[-1]})")
 
-        if products is None and len(batch) > 1:
-            # The batch failed: retry each product on its own
+        if products is None and len(batch) > 1 and scanned_items:
+            # Only worth retrying one by one if the API has been returning data so far
             products = []
             for pid in batch:
                 single = fetch_stock_batch([pid], label=f"(id {pid})")
                 if single:
                     products.extend(single)
 
-        for product in products or []:
-            collect_product(product, scanned_items, stats)
+        if products:
+            failed_in_a_row = 0
+            for product in products:
+                collect_product(product, scanned_items, stats)
+        else:
+            failed_in_a_row += 1
+            if not scanned_items and failed_in_a_row >= 3:
+                print("Stock API keeps returning nothing - stopping early.")
+                stats["api_empty"] = True
+                break
 
         time.sleep(0.5)
 
@@ -459,6 +481,12 @@ def sync_inventory_and_alert():
 
     if not current_inventory:
         print("No inventory data retrieved. Sending scan failure alert.")
+        if stats.get("api_empty"):
+            post_discord(
+                "🚨 **INVENTORY EMERGENCY!** The stock API keeps answering with an empty list, so it probably wants a header "
+                "or key we aren't sending (the Store-Hash header may have changed). Nothing was written to the database. Check the Action log!"
+            )
+            return
         post_discord(
             "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* "
             "(no stock numbers from the stock API). Nothing was written to the database. Check the Action log!"
