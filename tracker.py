@@ -189,7 +189,6 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
-    # Fetch up to 250 variants per product to capture all colorways/sizes for large styles like 4001
     query = """
     query FetchCatalog($productCursor: String) {
       site {
@@ -298,7 +297,18 @@ def sync_inventory_and_alert():
         return
 
     response = supabase.table("inventory_states").select("*").execute()
-    previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
+    
+    # Store both direct SKU keys and alias matches (e.g. CHA_P vs CHARC)
+    previous_states = {}
+    if response.data:
+        for item in response.data:
+            v_id = item.get("variant_id")
+            previous_states[v_id] = item
+            # Create a fallback lookup alias if SKU contains CHA_P or CHARC
+            if "-CHA_P-" in v_id:
+                previous_states[v_id.replace("-CHA_P-", "-CHARC-")] = item
+            elif "-CHARC-" in v_id:
+                previous_states[v_id.replace("-CHARC-", "-CHA_P-")] = item
 
     alerts = []
     upsert_payload = []
@@ -312,14 +322,15 @@ def sync_inventory_and_alert():
         if prev_data is not None:
             was_low = prev_data.get("is_below_25", False)
             
-            # 1. Low Stock Alert (crossed into low stock, or count changed while low)
+            # 1. Low Stock Alert
             if is_low and (not was_low or prev_data.get("stock_count") != stock):
                 alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
             
-            # 2. Restock Alert (was low, but recovered back to 25 or above!)
+            # 2. Restock Alert
             elif not is_low and was_low:
                 alerts.append(f"🎉 **Restock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock recovered to **{stock}** units!")
 
+        # Always upsert using the incoming API SKU key
         upsert_payload.append({
             "variant_id": sku,
             "style_sku": item_data["style_sku"],
