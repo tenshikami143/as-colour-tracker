@@ -15,14 +15,15 @@ else:
 
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 
-# Include Origin and Referer headers so BigCommerce accepts the browser storefront token
+# Send all common header keys so the API gateway accepts the token format
 HEADERS = {
     "Content-Type": "application/json",
     "Origin": "https://www.ascolour.com.au",
-    "Referer": "https://www.ascolour.com.au/"
+    "Referer": "https://www.ascolour.com.au/",
+    "Authorization": f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}" if ASCOLOUR_GRAPHQL_TOKEN else "",
+    "X-Auth-Token": ASCOLOUR_GRAPHQL_TOKEN if ASCOLOUR_GRAPHQL_TOKEN else "",
+    "Token": ASCOLOUR_GRAPHQL_TOKEN if ASCOLOUR_GRAPHQL_TOKEN else ""
 }
-if ASCOLOUR_GRAPHQL_TOKEN:
-    HEADERS["Authorization"] = f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}"
 
 TARGET_STYLES = [
     "4001", "4026", "4051", "4008", "4079", "4006", "4125", "4161", "4160", "1117", "1160"
