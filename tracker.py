@@ -1,7 +1,6 @@
 import os
 import time
 import random
-import base64
 import json
 import requests
 from datetime import datetime, timezone
@@ -12,16 +11,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour Australia GraphQL API (only used to look up product IDs for each style)
-GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
-raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
-
-if raw_token and raw_token.lower().startswith("bearer "):
-    API_TOKEN = raw_token.split(" ", 1)[1].strip()
-else:
-    API_TOKEN = raw_token
-
-# AS Colour's live stock API (the one the bulk order grid on the website uses)
+# AS Colour's live stock API (the same one the bulk order grid on the website uses). No login or token needed.
 STOCK_API_URL = "https://u43tbzpa7g.execute-api.ap-southeast-2.amazonaws.com/production//catalog/products"
 STOCK_API_HEADERS = {
     "Accept": "application/json",
@@ -32,7 +22,8 @@ STOCK_API_HEADERS = {
     "Pragma": "no-cache",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 }
-# Extra headers for the stock API as JSON, e.g. {"x-api-key": "..."} (put it in a GitHub secret)
+
+# Extra headers for the stock API as JSON, e.g. {"Store-Hash": "newvalue"} (only needed if the site changes them)
 _extra_headers = os.environ.get("STOCK_API_EXTRA_HEADERS")
 if _extra_headers:
     try:
@@ -40,10 +31,13 @@ if _extra_headers:
     except ValueError:
         print("STOCK_API_EXTRA_HEADERS is not valid JSON - ignoring it.")
 
-STOCK_BATCH_SIZE = 10  # how many product IDs to request per call
+STOCK_BATCH_SIZE = 10                                   # how many product IDs to request per call
+SCAN_MAX_ID = int(os.environ.get("SCAN_MAX_ID", "2000"))  # highest product ID to try when scanning
+PROBE_IDS = [416, 417, 248, 247]                        # products known to exist, used to check the API is answering
 
-# Optional: hard-code {style_sku: product_id} to skip the GraphQL lookup (and the token) completely.
-# Run once with PRINT_IDS=1 to get this dictionary printed in the log, then paste it here.
+# {style_sku: product_id} for every target style. While this is empty (or incomplete) the script
+# scans product IDs 1..SCAN_MAX_ID to find them (slow, about 3-4 minutes) and prints the finished
+# dictionary in the log. Paste that dictionary here to make every run fast.
 STYLE_PRODUCT_IDS = {
     # "4001": 416,
     # "3005": 247,
@@ -53,12 +47,10 @@ STYLE_PRODUCT_IDS = {
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 # Optional switches (set as env vars in the workflow)
-#   SEED_ONLY=1  -> write stock to Supabase but send NO low-stock alerts (use for the first run after a fix)
+#   SEED_ONLY=1  -> write stock to Supabase but send NO low-stock alerts
 #   DEBUG_RAW=1  -> print a few raw variants so you can see what the API returns
-#   PRINT_IDS=1  -> print the {style: product_id} dictionary found via GraphQL
 SEED_ONLY = os.environ.get("SEED_ONLY") == "1"
 DEBUG_RAW = os.environ.get("DEBUG_RAW") == "1"
-PRINT_IDS = os.environ.get("PRINT_IDS") == "1"
 
 # If more than this share of variants come back without a stock number, treat the scan as broken
 MAX_NO_DATA_RATIO = 0.5
@@ -227,109 +219,15 @@ def to_int(value):
         return None
 
 
-def check_token_expiration_and_alert():
-    if not API_TOKEN or not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        parts = API_TOKEN.split(".")
-        if len(parts) < 2:
-            return
-        payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_part).decode("utf-8"))
-
-        eat = payload.get("eat")
-        if eat:
-            now_ts = datetime.now(timezone.utc).timestamp()
-            days_left = (eat - now_ts) / 86400  # Convert seconds to days
-
-            if days_left <= 0:
-                msg = "🚨 **MAYDAY! THE TOKEN HAS OFFICIALLY KICKED THE BUCKET!** 🪦 AS Colour has locked us out in the cold. Drop what you're doing, grab a fresh token, and slap it into GitHub Secrets before the tees revolt!"
-                post_discord(msg)
-                print("Alert sent: Token expired.")
-            elif days_left <= 5:
-                msg = f"⏳ **TICK-TOCK!** Your AS Colour token is aging like fine milk and expires in **{round(days_left, 1)} days**. Get ahead of the chaos and grab a fresh token before this ship hits the iceberg!"
-                post_discord(msg)
-                print(f"Alert sent: Token expires in {round(days_left, 1)} days.")
-    except Exception as e:
-        print(f"Error checking token expiration: {e}")
-
-
 # ---------------------------------------------------------------------------
-# Step 1: find the product ID of each target style (GraphQL, needs the token)
+# Stock API
 # ---------------------------------------------------------------------------
 
-PRODUCT_ID_QUERY = """
-query ProductIds($cursor: String) {
-  site {
-    products(first: 50, after: $cursor) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      edges {
-        node {
-          entityId
-          sku
-        }
-      }
-    }
-  }
-}
-"""
-
-
-def discover_product_ids():
-    headers = {"Content-Type": "application/json"}
-    if API_TOKEN:
-        headers["Authorization"] = f"Bearer {API_TOKEN}"
-
-    found = {}
-    cursor = None
-    has_next = True
-
-    while has_next:
-        try:
-            response = requests.post(
-                GRAPHQL_URL,
-                json={"query": PRODUCT_ID_QUERY, "variables": {"cursor": cursor}},
-                headers=headers,
-                timeout=60,
-            )
-        except Exception as e:
-            print(f"GraphQL request exception: {e}")
-            break
-
-        if response.status_code != 200:
-            print(f"GraphQL API Error: {response.status_code} - {response.text[:500]}")
-            break
-
-        data = response.json()
-        if data.get("errors") and not data.get("data"):
-            print(f"GraphQL Error(s): {data['errors']}")
-            break
-
-        products = ((data.get("data") or {}).get("site") or {}).get("products") or {}
-        for edge in products.get("edges", []) or []:
-            node = edge.get("node") or {}
-            sku = (node.get("sku") or "").strip()
-            entity_id = node.get("entityId")
-            canonical = TARGET_LOWER.get(sku.lower())
-            if canonical and entity_id:
-                found[canonical] = entity_id
-
-        page_info = products.get("pageInfo") or {}
-        has_next = page_info.get("hasNextPage", False)
-        cursor = page_info.get("endCursor")
-
-    return found
-
-
-# ---------------------------------------------------------------------------
-# Step 2: read live stock from AS Colour's stock API (same one the website grid uses)
-# ---------------------------------------------------------------------------
-
-def fetch_stock_batch(product_ids, label=""):
-    """Returns a list of product dicts, or None if the request failed."""
+def fetch_stock_batch(product_ids, label="", retry_empty=True):
+    """
+    Returns a list of product dicts. Returns None if the request failed (or, when retry_empty is
+    True, if it kept coming back empty). With retry_empty=False an empty list is returned as [].
+    """
     ids_param = ",".join(str(i) for i in product_ids)
     url = f"{STOCK_API_URL}?product_ids={ids_param}&customer_email="
 
@@ -356,6 +254,9 @@ def fetch_stock_batch(product_ids, label=""):
         if isinstance(data, list) and data:
             return data
 
+        if not retry_empty:
+            return []
+
         print(f"Stock API returned an empty result {label} (attempt {attempt + 1}/2)")
         time.sleep(1)
 
@@ -370,6 +271,9 @@ def collect_product(product, scanned_items, stats):
         return
 
     stats["styles_found"].add(style_sku)
+    if product.get("id"):
+        stats["style_ids"][style_sku] = product.get("id")
+
     product_level_stock = to_int(product.get("inventory_level"))
     tracked_per_product = product.get("inventory_tracking") == "product"
 
@@ -403,27 +307,32 @@ def collect_product(product, scanned_items, stats):
         }
 
 
-def fetch_monitored_inventory():
-    scanned_items = {}
-    stats = {"seen": 0, "no_data": 0, "debug_printed": 0, "styles_found": set(), "ids_ok": True, "api_empty": False}
+def scan_for_products(scanned_items, stats):
+    """Slow path: try every product ID, keep the products whose SKU is one of our target styles."""
+    print(f"STYLE_PRODUCT_IDS is incomplete, scanning product IDs 1..{SCAN_MAX_ID} (takes a few minutes)...")
 
-    style_ids = dict(STYLE_PRODUCT_IDS)
-    if not style_ids:
-        print("Looking up product IDs via GraphQL...")
-        style_ids = discover_product_ids()
-        if PRINT_IDS:
-            print("STYLE_PRODUCT_IDS = " + json.dumps(dict(sorted(style_ids.items())), indent=4))
+    # Make sure the API is answering at all before spending minutes on a scan
+    probe = fetch_stock_batch(PROBE_IDS, label="(probe)")
+    if not probe:
+        stats["api_empty"] = True
+        return
 
-    if not style_ids:
-        stats["ids_ok"] = False
-        return scanned_items, stats
+    for start in range(1, SCAN_MAX_ID + 1, STOCK_BATCH_SIZE):
+        batch = list(range(start, min(start + STOCK_BATCH_SIZE, SCAN_MAX_ID + 1)))
+        products = fetch_stock_batch(batch, label=f"(ids {batch[0]}..{batch[-1]})", retry_empty=False)
+        for product in products or []:
+            collect_product(product, scanned_items, stats)
+        time.sleep(0.3)
 
-    missing_ids = [s for s in TARGET_STYLES if s not in style_ids]
-    if missing_ids:
-        print(f"No product ID found for styles: {', '.join(missing_ids)}")
+    print("Paste this into tracker.py (replace the empty STYLE_PRODUCT_IDS) to skip the scan next time:")
+    print("STYLE_PRODUCT_IDS = " + json.dumps(dict(sorted(stats["style_ids"].items())), indent=4))
 
+
+def fetch_known_products(style_ids, scanned_items, stats):
+    """Fast path: we know every product ID, so just request them in batches."""
     id_list = sorted(set(style_ids.values()))
     failed_in_a_row = 0
+
     for i in range(0, len(id_list), STOCK_BATCH_SIZE):
         batch = id_list[i:i + STOCK_BATCH_SIZE]
         products = fetch_stock_batch(batch, label=f"(ids {batch[0]}..{batch[-1]})")
@@ -449,6 +358,25 @@ def fetch_monitored_inventory():
 
         time.sleep(0.5)
 
+
+def fetch_monitored_inventory():
+    scanned_items = {}
+    stats = {
+        "seen": 0, "no_data": 0, "debug_printed": 0,
+        "styles_found": set(), "style_ids": {}, "api_empty": False,
+    }
+
+    known_ids = {
+        TARGET_LOWER[style.lower()]: pid
+        for style, pid in STYLE_PRODUCT_IDS.items()
+        if style.lower() in TARGET_LOWER
+    }
+
+    if len(known_ids) == len(TARGET_STYLES):
+        fetch_known_products(known_ids, scanned_items, stats)
+    else:
+        scan_for_products(scanned_items, stats)
+
     stats["missing_styles"] = [s for s in TARGET_STYLES if s not in stats["styles_found"]]
     return scanned_items, stats
 
@@ -458,10 +386,6 @@ def fetch_monitored_inventory():
 # ---------------------------------------------------------------------------
 
 def sync_inventory_and_alert():
-    # Token only matters when product IDs are looked up through GraphQL
-    if not STYLE_PRODUCT_IDS:
-        check_token_expiration_and_alert()
-
     print("Fetching live stock from AS Colour Australia...")
     current_inventory, stats = fetch_monitored_inventory()
     print(
@@ -471,26 +395,18 @@ def sync_inventory_and_alert():
     if stats.get("missing_styles"):
         print(f"Styles with no data: {', '.join(stats['missing_styles'])}")
 
-    if not stats["ids_ok"]:
-        print("Could not get product IDs. Sending alert.")
-        post_discord(
-            "🚨 **INVENTORY EMERGENCY!** Couldn't look up the product IDs (the GraphQL token is probably missing or expired). "
-            "Nothing was written to the database. Grab a fresh token and update the GitHub secret!"
-        )
-        return
-
     if not current_inventory:
         print("No inventory data retrieved. Sending scan failure alert.")
         if stats.get("api_empty"):
             post_discord(
                 "🚨 **INVENTORY EMERGENCY!** The stock API keeps answering with an empty list, so it probably wants a header "
-                "or key we aren't sending (the Store-Hash header may have changed). Nothing was written to the database. Check the Action log!"
+                "we aren't sending (the Store-Hash header may have changed). Nothing was written to the database. Check the Action log!"
             )
-            return
-        post_discord(
-            "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* "
-            "(no stock numbers from the stock API). Nothing was written to the database. Check the Action log!"
-        )
+        else:
+            post_discord(
+                "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* "
+                "(no stock numbers from the stock API). Nothing was written to the database. Check the Action log!"
+            )
         return
 
     # If a big share of variants had no stock number, the scan is unreliable - don't touch the DB
