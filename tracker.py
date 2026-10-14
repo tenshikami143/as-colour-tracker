@@ -120,4 +120,34 @@ SIZE_MAP = {
     "OS": "One Size",
     "P0-3": "0-3 Months",
     "Q3-6": "3-6 Months",
-    "R6-12": "6
+    "R6-12": "6-12 Months",
+    "00-03": "0-3 Months",
+    "03-06": "3-6 Months",
+    "06-12": "6-12 Months",
+    "12-18": "12-18 Months",
+    "18-24": "18-24 Months",
+    "S1218": "12-18 Months",
+    "T1824": "18-24 Months",
+    "XSM": "XS",
+    "SML": "Small",
+    "MED": "Medium",
+    "LGE": "Large",
+    "XLG": "XL",
+    "2XL": "2XL",
+    "3XL": "3XL"
+}
+
+
+def parse_sku_attributes(variant_sku):
+    normalized_sku = variant_sku.replace("-CHARC-", "-CHA_P-")
+    
+    parts = normalized_sku.split("-")
+    if len(parts) >= 3:
+        raw_colour = parts[1]
+        raw_size = "-".join(parts[2:])
+        
+        colour = COLOUR_MAP.get(raw_colour, raw_colour.replace("_", " ").title())
+        size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
+        
+        return colour, size, normalized_sku
+    return "N/A", "N/A", variant
