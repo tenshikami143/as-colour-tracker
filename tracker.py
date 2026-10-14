@@ -8,15 +8,21 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
+# Debug print to confirm token is loaded by GitHub Actions (safe preview)
+if ASCOLOUR_GRAPHQL_TOKEN:
+    print(f"Token loaded check: YES (Length: {len(ASCOLOUR_GRAPHQL_TOKEN)})")
+else:
+    print("Token loaded check: NO - MISSING FROM ENVIRONMENT")
+
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 
-# Only include authorization if the token secret is provided and non-empty
 HEADERS = {
     "Content-Type": "application/json"
 }
 if ASCOLOUR_GRAPHQL_TOKEN:
     HEADERS["Authorization"] = f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}"
 
+# Target Style SKUs
 TARGET_STYLES = [
     "4001", "4026", "4051", "4008", "4079", "4006", "4125", "4161", "4160", "1117", "1160"
 ]
@@ -58,7 +64,7 @@ def fetch_inventory_for_style(style_sku):
     try:
         response = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=30)
         if response.status_code != 200:
-            print(f"API Error: {response.status_code} - {response.text}")
+            print(f"API Error for style {style_sku}: {response.status_code} - {response.text}")
             return []
             
         data = response.json()
@@ -133,6 +139,7 @@ def main():
         print(f"Scanned {len(all_records)} target variants from API.")
     else:
         print("No inventory data retrieved.")
+        send_discord_alert("⚠️ Inventory Tracker warning: No inventory data was retrieved during the latest run.")
 
 if __name__ == "__main__":
     main()
