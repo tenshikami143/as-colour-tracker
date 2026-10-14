@@ -1,5 +1,7 @@
 import os
+import sys
 import time
+import traceback
 import random
 import json
 import requests
@@ -9,7 +11,7 @@ from supabase import create_client, Client
 # Initialize Supabase credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = None  # created in main() so a missing secret is reported to Discord instead of crashing silently
 
 # AS Colour's live stock API (the same one the bulk order grid on the website uses). No login or token needed.
 STOCK_API_URL = "https://u43tbzpa7g.execute-api.ap-southeast-2.amazonaws.com/production//catalog/products"
@@ -35,10 +37,9 @@ STOCK_BATCH_SIZE = 10                                   # how many product IDs t
 SCAN_MAX_ID = int(os.environ.get("SCAN_MAX_ID", "2000"))  # highest product ID to try when scanning
 PROBE_IDS = [416, 417, 248, 247]                        # products known to exist, used to check the API is answering
 
-# {style_sku: product_id} for every target style (found by the scan on 14 Oct 2026). If this is ever empty or incomplete the script
-# scans product IDs 1..SCAN_MAX_ID to find them (slow, about 3-4 minutes) and prints the finished
-# dictionary in the log. Paste that dictionary here to make every run fast.
-STYLE_PRODUCT_IDS = {
+# Built-in fallback list, used only if the Supabase `watchlist` table can't be read.
+# {style_sku: product_id} found by the scan on 14 Oct 2026.
+DEFAULT_PRODUCT_IDS = {
     "1000": 204,
     "1001": 205,
     "1002": 206,
@@ -113,6 +114,7 @@ STYLE_PRODUCT_IDS = {
     "5162": 694,
     "5402": 378,
 }
+STYLE_PRODUCT_IDS = dict(DEFAULT_PRODUCT_IDS)  # replaced at runtime by the watchlist table
 
 # Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -126,8 +128,8 @@ DEBUG_RAW = os.environ.get("DEBUG_RAW") == "1"
 # If more than this share of variants come back without a stock number, treat the scan as broken
 MAX_NO_DATA_RATIO = 0.5
 
-# Monitored Scope (73 Target Styles)
-TARGET_STYLES = [
+# Built-in fallback styles (the 73 original ones)
+DEFAULT_STYLES = [
     "1000", "1001", "1002", "1117", "3001", "3003", "3005", "3006", "3009", "3010",
     "3030", "3031", "3032", "3033", "3034", "3035", "3036", "3037", "4001", "4001g",
     "4008", "4017", "4019", "4023", "4024", "4026", "4053", "4062", "4063g", "4064g",
@@ -137,6 +139,8 @@ TARGET_STYLES = [
     "5101", "5102", "5102g", "5103", "5104", "5125", "5145", "5146", "5148", "5160",
     "5161", "5162", "5402"
 ]
+# The styles actually monitored this run (set from the Supabase `watchlist` table in setup_watchlist())
+TARGET_STYLES = list(DEFAULT_STYLES)
 TARGET_LOWER = {style.lower(): style for style in TARGET_STYLES}
 
 # Translation dictionaries for cleaner readability
@@ -204,13 +208,32 @@ SIZE_MAP = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+FAILED = False
+
+
 def post_discord(content):
+    """Returns True if Discord accepted the message."""
     if not DISCORD_WEBHOOK_URL:
-        return
+        return False
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=30)
+        response = requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=30)
+        return response.status_code < 300
     except Exception as e:
         print(f"Discord post failed: {e}")
+        return False
+
+
+def alert_failure(message):
+    """Post a failure alert, mark the run as failed (red in GitHub) and leave a flag so the workflow doesn't double-notify."""
+    global FAILED
+    FAILED = True
+    print(message)
+    if post_discord(message):
+        try:
+            with open("notified.flag", "w") as f:
+                f.write("1")
+        except OSError:
+            pass
 
 
 def parse_sku_attributes(variant_sku):
@@ -381,7 +404,7 @@ def collect_product(product, scanned_items, stats):
 
 def scan_for_products(scanned_items, stats):
     """Slow path: try every product ID, keep the products whose SKU is one of our target styles."""
-    print(f"STYLE_PRODUCT_IDS is incomplete, scanning product IDs 1..{SCAN_MAX_ID} (takes a few minutes)...")
+    print(f"Some styles have no product ID yet, scanning product IDs 1..{SCAN_MAX_ID} (takes a few minutes)...")
 
     # Make sure the API is answering at all before spending minutes on a scan
     probe = fetch_stock_batch(PROBE_IDS, label="(probe)")
@@ -396,8 +419,7 @@ def scan_for_products(scanned_items, stats):
             collect_product(product, scanned_items, stats)
         time.sleep(0.3)
 
-    print("Paste this into tracker.py (replace the empty STYLE_PRODUCT_IDS) to skip the scan next time:")
-    print("STYLE_PRODUCT_IDS = " + json.dumps(dict(sorted(stats["style_ids"].items())), indent=4))
+    print("Product IDs found: " + json.dumps(dict(sorted(stats["style_ids"].items()))))
 
 
 def fetch_known_products(style_ids, scanned_items, stats):
@@ -454,10 +476,121 @@ def fetch_monitored_inventory():
 
 
 # ---------------------------------------------------------------------------
+# Watchlist (Supabase table `watchlist`)
+# ---------------------------------------------------------------------------
+
+def apply_watchlist(styles, ids):
+    global TARGET_STYLES, TARGET_LOWER, STYLE_PRODUCT_IDS
+    TARGET_STYLES = list(styles)
+    TARGET_LOWER = {s.lower(): s for s in TARGET_STYLES}
+    STYLE_PRODUCT_IDS = dict(ids)
+
+
+def load_watchlist():
+    """Enabled rows of the `watchlist` table, or None if it can't be used (the built-in list is used instead)."""
+    try:
+        data = supabase.table("watchlist").select("*").execute().data or []
+    except Exception as e:
+        print(f"Could not read the watchlist table: {e}")
+        post_discord(
+            "⚠️ **Watchlist warning:** couldn't read the `watchlist` table in Supabase, so this run used the built-in "
+            "list of 73 styles instead. Check that the table exists and has RLS turned off (like `inventory_states`)."
+        )
+        return None
+
+    rows = [r for r in data if (r.get("style_sku") or "").strip() and r.get("enabled") is not False]
+    if not rows:
+        print("The watchlist table is empty (or every row is disabled).")
+        post_discord(
+            "⚠️ **Watchlist warning:** the `watchlist` table has no enabled styles, so this run used the built-in "
+            "list of 73 styles instead."
+        )
+        return None
+    return rows
+
+
+def setup_watchlist():
+    rows = load_watchlist()
+    if not rows:
+        apply_watchlist(DEFAULT_STYLES, DEFAULT_PRODUCT_IDS)
+        return None
+
+    styles, ids, seen = [], {}, set()
+    for row in rows:
+        sku = row["style_sku"].strip()
+        if sku.lower() in seen:
+            continue
+        seen.add(sku.lower())
+        styles.append(sku)
+        product_id = to_int(row.get("product_id"))
+        if product_id:
+            ids[sku] = product_id
+
+    apply_watchlist(styles, ids)
+    return rows
+
+
+def save_found_product_ids(rows, found_ids):
+    """Fill in the product_id column for rows that didn't have one, so later runs skip the slow scan."""
+    for row in rows or []:
+        canonical = TARGET_LOWER.get(row["style_sku"].strip().lower())
+        product_id = found_ids.get(canonical)
+        if product_id and to_int(row.get("product_id")) != product_id:
+            try:
+                supabase.table("watchlist").update({"product_id": product_id}).eq("style_sku", row["style_sku"]).execute()
+                print(f"Saved product ID {product_id} for style {row['style_sku']}.")
+            except Exception as e:
+                print(f"Could not save the product ID for {row['style_sku']}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main sync
 # ---------------------------------------------------------------------------
 
+FUN_MESSAGES = [
+    "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
+    "🚀 **Smooth Operations:** Stock levels are rock solid across your whole watchlist today. Keep up the awesome work! 🚀",
+    "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
+    "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
+    "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
+    "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
+    "💪 **Fort Knox Inventory:** Every watchlist style are fully stocked and holding the line today! 💪",
+    "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
+    "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
+    "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
+    "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀",
+    "☕ **Pour Another Cup:** Everything is looking great across the catalog today. Sit back and enjoy your morning brew! ☕",
+    "✨ **Golden Ratio:** No new low stock, no restock chaos. Just a pristine, smooth inventory run! ✨",
+    "💤 **Sleeping Soundly:** The inventory warehouse is completely undisturbed today. Shhh, don't wake the tees! 💤",
+    "🥧 **Flawless Run:** Today's scan went smoother than butter. All monitored styles are safe and sound! 🥧",
+    "⚓ **On Course:** Staying steady on the high seas! Zero inventory emergencies detected in the last 24 hours. ⚓",
+    "🕶️ **Too Cool for Stock Outs:** Stock levels are staying comfortable today. Put on those shades and enjoy your morning! 🕶️",
+    "🏆 **Victory Lap:** No low-stock flags raised today! You're winning the inventory game. 🏆",
+    "🥑 **Holy Guacamole!** Another day, another completely clean inventory report. Keep crushing it! 🥑",
+    "🎮 **Level Complete:** Daily scan finished with 0 errors and 0 inventory alerts! Maximum score achieved. 🎮",
+    "🌈 **Sunshine & Rainbows:** Nothing but healthy stock numbers across your whole watchlist today! 🌈",
+    "🤫 **Warehouse Whispers:** The shelves are quiet today. All target variants are staying right where they belong! 🤫",
+    "✈️ **Cruising Altitude:** 30,000 feet up and zero turbulence in the stock room today! ✈️",
+    "🎵 **Sweet Harmony:** All styles are in perfect sync today. Not a single stock alarm sounded! 🎵",
+    "🪄 **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
+    "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
+    "🖼️ **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
+    "⚡ **Fully Charged:** Stock counts across all monitored items are looking super healthy today! ⚡",
+    "🏅 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🏅",
+    "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
+    "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
+    "🍀 **Lucky Days:** No surprise out-of-stock events today. Lady Luck is on our side! 🍀",
+    "🚦 **Smooth Highway:** Cruising on green lights all morning. No inventory speed bumps today! 🚦",
+    "🏰 **Castle Guarded:** The inventory fortress remains untouched today. All stock holds firm! 🏰",
+    "🍕 **Pizza Time:** No inventory crises to handle today, so you've earned a pizza slice later! 🍕"
+]
+
+
 def sync_inventory_and_alert():
+    watchlist_rows = setup_watchlist()
+    source = "the Supabase watchlist table" if watchlist_rows else "the built-in list"
+    print(f"Watching {len(TARGET_STYLES)} styles from {source}.")
+
     print("Fetching live stock from AS Colour Australia...")
     current_inventory, stats = fetch_monitored_inventory()
     print(
@@ -468,27 +601,35 @@ def sync_inventory_and_alert():
         print(f"Styles with no data: {', '.join(stats['missing_styles'])}")
 
     if not current_inventory:
-        print("No inventory data retrieved. Sending scan failure alert.")
         if stats.get("api_empty"):
-            post_discord(
-                "🚨 **INVENTORY EMERGENCY!** The stock API keeps answering with an empty list, so it probably wants a header "
+            alert_failure(
+                "🚨 **SCAN FAILED!** The stock API keeps answering with an empty list, so it probably wants a header "
                 "we aren't sending (the Store-Hash header may have changed). Nothing was written to the database. Check the Action log!"
             )
         else:
-            post_discord(
-                "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* "
+            alert_failure(
+                "🚨 **SCAN FAILED!** The tracker went looking for tees and found *absolute emptiness* "
                 "(no stock numbers from the stock API). Nothing was written to the database. Check the Action log!"
             )
         return
 
     # If a big share of variants had no stock number, the scan is unreliable - don't touch the DB
     if stats["seen"] and (stats["no_data"] / stats["seen"]) > MAX_NO_DATA_RATIO:
-        print("Too many variants without stock data. Aborting before writing to Supabase.")
-        post_discord(
-            f"⚠️ **PARTIAL DATA:** {stats['no_data']} of {stats['seen']} variants returned no stock number, "
+        alert_failure(
+            f"🚨 **SCAN FAILED (partial data):** {stats['no_data']} of {stats['seen']} variants returned no stock number, "
             "so this scan was skipped to avoid saving wrong zeros. Check the Action log."
         )
         return
+
+    if stats.get("missing_styles"):
+        post_discord(
+            "⚠️ **Watchlist warning:** couldn't find these styles on AS Colour: "
+            + ", ".join(f"`{s}`" for s in stats["missing_styles"])
+            + ". Check them for typos in the `watchlist` table (they were skipped)."
+        )
+
+    if watchlist_rows:
+        save_found_product_ids(watchlist_rows, stats["style_ids"])
 
     response = supabase.table("inventory_states").select("*").execute()
     previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
@@ -533,50 +674,27 @@ def sync_inventory_and_alert():
     if DISCORD_WEBHOOK_URL:
         if alerts:
             for i in range(0, len(alerts), 10):
-                chunk = "\n".join(alerts[i:i + 10])
-                post_discord(chunk)
+                post_discord("\n".join(alerts[i:i + 10]))
             print(f"Sent {len(alerts)} alert(s) to Discord.")
         else:
-            fun_messages = [
-                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
-                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
-                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
-                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
-                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
-                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
-                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
-                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
-                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
-                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
-                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀",
-                "☕ **Pour Another Cup:** Everything is looking great across the catalog today. Sit back and enjoy your morning brew! ☕",
-                "✨ **Golden Ratio:** No new low stock, no restock chaos. Just a pristine, smooth inventory run! ✨",
-                "💤 **Sleeping Soundly:** The inventory warehouse is completely undisturbed today. Shhh, don't wake the tees! 💤",
-                "🥧 **Flawless Run:** Today's scan went smoother than butter. All monitored styles are safe and sound! 🥧",
-                "⚓ **On Course:** Staying steady on the high seas! Zero inventory emergencies detected in the last 24 hours. ⚓",
-                "🕶️ **Too Cool for Stock Outs:** Stock levels are staying comfortable today. Put on those shades and enjoy your morning! 🕶️",
-                "🏆 **Victory Lap:** No low-stock flags raised today! You're winning the inventory game. 🏆",
-                "🥑 **Holy Guacamole!** Another day, another completely clean inventory report. Keep crushing it! 🥑",
-                "🎮 **Level Complete:** Daily scan finished with 0 errors and 0 inventory alerts! Maximum score achieved. 🎮",
-                "🌈 **Sunshine & Rainbows:** Nothing but healthy stock numbers across all 73 styles today! 🌈",
-                "🤫 **Warehouse Whispers:** The shelves are quiet today. All target variants are staying right where they belong! 🤫",
-                "✈️ **Cruising Altitude:** 30,000 feet up and zero turbulence in the stock room today! ✈️",
-                "🎵 **Sweet Harmony:** All styles are in perfect sync today. Not a single stock alarm sounded! 🎵",
-                "🪄 **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
-                "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
-                "🖼️ **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
-                "⚡ **Fully Charged:** Stock counts across all monitored items are looking super healthy today! ⚡",
-                "🏅 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🏅",
-                "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
-                "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
-                "🍀 **Lucky Days:** No surprise out-of-stock events today. Lady Luck is on our side! 🍀",
-                "🚦 **Smooth Highway:** Cruising on green lights all morning. No inventory speed bumps today! 🚦",
-                "🏰 **Castle Guarded:** The inventory fortress remains untouched today. All stock holds firm! 🏰",
-                "🍕 **Pizza Time:** No inventory crises to handle today, so you've earned a pizza slice later! 🍕"
-            ]
-            post_discord(random.choice(fun_messages))
+            post_discord(random.choice(FUN_MESSAGES))
             print("Discord alert delivered successfully.")
 
 
+def main():
+    global supabase
+    try:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are missing (check the GitHub secrets and the workflow env block)")
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        sync_inventory_and_alert()
+    except Exception as e:
+        traceback.print_exc()
+        alert_failure(f"🚨 **TRACKER CRASHED!** `{type(e).__name__}: {str(e)[:300]}` Nothing (or only part of the run) was saved. Check the Action log!")
+
+    if FAILED:
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    sync_inventory_and_alert()
+    main()
