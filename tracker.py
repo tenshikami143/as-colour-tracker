@@ -260,12 +260,11 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        inv_data = v_node.get("inventory", {})
-                        
-                        # Debug log to inspect raw inventory object
+                        # Debug log to inspect full variant keys
                         if "4001" in style_sku and "CHA" in variant_sku:
-                            print(f"DEBUG RAW INVENTORY FOR {variant_sku}: {inv_data}")
+                            print(f"DEBUG FULL VARIANT KEYS FOR {variant_sku}: {list(v_node.keys())}")
 
+                        inv_data = v_node.get("inventory", {})
                         stock = 0
                         if inv_data and inv_data.get("aggregated"):
                             stock = inv_data.get("aggregated", {}).get("availableToSell", 0)
