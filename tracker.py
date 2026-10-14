@@ -8,12 +8,10 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
-# Initialize Supabase credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
@@ -22,10 +20,8 @@ if raw_token and raw_token.lower().startswith("bearer "):
 else:
     API_TOKEN = raw_token
 
-# Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# Monitored Scope (73 Target Styles)
 TARGET_STYLES = [
     "1000", "1001", "1002", "1117", "3001", "3003", "3005", "3006", "3009", "3010",
     "3030", "3031", "3032", "3033", "3034", "3035", "3036", "3037", "4001", "4001g",
@@ -66,7 +62,6 @@ SIZE_MAP = {
     "XSM": "XS", "SML": "Small", "MED": "Medium", "LGE": "Large", "XLG": "XL", "2XL": "2XL", "3XL": "3XL"
 }
 
-
 def parse_sku_attributes(variant_sku):
     normalized_sku = variant_sku.replace("-CHARC-", "-CHA_P-")
     parts = normalized_sku.split("-")
@@ -77,28 +72,6 @@ def parse_sku_attributes(variant_sku):
         size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
         return colour, size, normalized_sku
     return "N/A", "N/A", variant_sku
-
-
-def check_token_expiration_and_alert():
-    if not API_TOKEN or not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        parts = API_TOKEN.split(".")
-        if len(parts) < 2:
-            return
-        payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_part).decode("utf-8"))
-        eat = payload.get("eat")
-        if eat:
-            now_ts = datetime.now(timezone.utc).timestamp()
-            days_left = (eat - now_ts) / 86400
-            if days_left <= 0:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 **TOKEN EXPIRED!** Update GitHub Secrets."})
-            elif days_left <= 5:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": f"⏳ Token expires in **{round(days_left, 1)} days**."})
-    except Exception as e:
-        print(f"Error checking token: {e}")
-
 
 def fetch_monitored_inventory():
     headers = {"Content-Type": "application/json"}
@@ -129,10 +102,9 @@ def fetch_monitored_inventory():
                     sku
                     inventory {
                       byLocation {
-                        edges {
-                          node {
-                            availableToSell
-                          }
+                        availableToSell
+                        location {
+                          name
                         }
                       }
                     }
@@ -146,19 +118,16 @@ def fetch_monitored_inventory():
     }
     """
 
+    debug_printed = False
+
     while has_next_products:
         variables = {"productCursor": product_cursor}
         try:
             response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
             if response.status_code != 200:
-                print(f"API Error: {response.status_code} - {response.text}")
                 break
 
             data = response.json()
-            if "errors" in data:
-                print(f"GraphQL Error: {data['errors']}")
-                break
-
             products_data = data.get("data", {}).get("site", {}).get("products", {})
             edges = products_data.get("edges", [])
 
@@ -176,17 +145,18 @@ def fetch_monitored_inventory():
                         raw_v_sku = v_node.get("sku", "").strip()
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
-
                         inv_data = v_node.get("inventory") or {}
-                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
-                        loc_edges = by_location.get("edges", []) if isinstance(by_location, dict) else []
-                        
+
+                        if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
+                            print(f"🔍 RAW INVENTORY BY-LOCATION FOR BERRY: {json.dumps(inv_data, indent=2)}")
+                            debug_printed = True
+
+                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else []
                         stock = 0
-                        for loc_edge in loc_edges:
-                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
-                            val = loc_node.get("availableToSell")
-                            if val is not None:
-                                stock += val
+                        if isinstance(by_location, list):
+                            for loc in by_location:
+                                if isinstance(loc, dict) and loc.get("availableToSell") is not None:
+                                    stock += loc.get("availableToSell")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -206,76 +176,9 @@ def fetch_monitored_inventory():
 
     return scanned_items
 
-
 def sync_inventory_and_alert():
-    check_token_expiration_and_alert()
-    print("Fetching catalog data with correct byLocation inventory...")
     current_inventory = fetch_monitored_inventory()
-    print(f"Scanned {len(current_inventory)} target variants from API.")
-
-    if not current_inventory:
-        print("No inventory data retrieved.")
-        if DISCORD_WEBHOOK_URL:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 **INVENTORY EMERGENCY!** No inventory data returned from API."})
-        return
-
-    print("Fetching previous states from Supabase...")
-    response = supabase.table("inventory_states").select("*").execute()
-    previous_states = {item.get("variant_id"): item for item in response.data} if response.data else {}
-
-    alerts = []
-    upsert_payload = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    for sku, item_data in current_inventory.items():
-        stock = item_data["stock"]
-        prev_data = previous_states.get(sku)
-        is_low = stock < 25
-
-        if prev_data is not None:
-            was_low = prev_data.get("is_below_25", False)
-            if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
-            elif not is_low and was_low:
-                alerts.append(f"🎉 **Restock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock recovered to **{stock}** units!")
-
-        upsert_payload.append({
-            "variant_id": sku,
-            "style_sku": item_data["style_sku"],
-            "product_name": item_data["product_name"],
-            "colour_name": item_data["colour_name"],
-            "size_name": item_data["size_name"],
-            "stock_count": stock,
-            "is_below_25": is_low,
-            "updated_at": now_iso
-        })
-
-    if upsert_payload:
-        print(f"Upserting {len(upsert_payload)} items into Supabase...")
-        supabase.table("inventory_states").upsert(upsert_payload).execute()
-
-    if DISCORD_WEBHOOK_URL:
-        if alerts:
-            print(f"Found {len(alerts)} alerts to send.")
-            for alert in alerts:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": alert})
-        else:
-            print("No alerts generated. Sending fallback confirmation...")
-            fun_messages = [
-                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
-                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
-                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
-                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
-                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
-                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
-                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
-                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
-                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
-                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
-                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀"
-            ]
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": random.choice(fun_messages)})
-
+    print(f"Scanned {len(current_inventory)} target variants with inspection.")
 
 if __name__ == "__main__":
     sync_inventory_and_alert()
