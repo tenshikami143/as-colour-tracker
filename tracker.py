@@ -211,11 +211,10 @@ def fetch_monitored_inventory():
                   node {
                     id
                     sku
-                    quantityAvailable
-                    inventoryQuantity
                     inventory {
                       aggregated {
                         availableToSell
+                        onHand
                       }
                     }
                   }
@@ -262,21 +261,20 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        # Extract stock using requested fields
+                        # Extract stock using aggregated subfields
                         inv_data = v_node.get("inventory") or {}
                         agg_data = inv_data.get("aggregated") if isinstance(inv_data, dict) else None
                         
                         stock = 0
-                        if isinstance(agg_data, dict) and agg_data.get("availableToSell") is not None:
-                            stock = agg_data.get("availableToSell")
-                        elif v_node.get("quantityAvailable") is not None:
-                            stock = v_node.get("quantityAvailable")
-                        elif v_node.get("inventoryQuantity") is not None:
-                            stock = v_node.get("inventoryQuantity")
+                        if isinstance(agg_data, dict):
+                            if agg_data.get("availableToSell") is not None:
+                                stock = agg_data.get("availableToSell")
+                            elif agg_data.get("onHand") is not None:
+                                stock = agg_data.get("onHand")
 
                         # Detailed debug log for sample style 4001 Berry item
                         if "4001" in style_sku and "BERRY" in variant_sku:
-                            print(f"DEBUG BERRY STOCK: v_node keys={list(v_node.keys())}, inv={inv_data}, stock={stock}")
+                            print(f"DEBUG BERRY INVENTORY: inv={inv_data}, stock={stock}")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
