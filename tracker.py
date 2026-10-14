@@ -3,12 +3,11 @@ import requests
 from datetime import datetime
 
 # Environment Variables from GitHub Actions Secrets
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN", "").strip()
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# Debug print to confirm token is loaded by GitHub Actions (safe preview)
 if ASCOLOUR_GRAPHQL_TOKEN:
     print(f"Token loaded check: YES (Length: {len(ASCOLOUR_GRAPHQL_TOKEN)})")
 else:
@@ -16,13 +15,15 @@ else:
 
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 
+# Include Origin and Referer headers so BigCommerce accepts the browser storefront token
 HEADERS = {
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Origin": "https://www.ascolour.com.au",
+    "Referer": "https://www.ascolour.com.au/"
 }
 if ASCOLOUR_GRAPHQL_TOKEN:
     HEADERS["Authorization"] = f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}"
 
-# Target Style SKUs
 TARGET_STYLES = [
     "4001", "4026", "4051", "4008", "4079", "4006", "4125", "4161", "4160", "1117", "1160"
 ]
