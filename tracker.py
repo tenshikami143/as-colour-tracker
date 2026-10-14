@@ -105,6 +105,7 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
+    # Let's query availablefields on inventory or check variant level stock flags
     query = """
     query FetchCatalog($productCursor: String) {
       site {
@@ -124,13 +125,7 @@ def fetch_monitored_inventory():
                     id
                     sku
                     inventory {
-                      byLocation {
-                        edges {
-                          node {
-                            availableToSell
-                          }
-                        }
-                      }
+                      inStock
                     }
                   }
                 }
@@ -174,21 +169,13 @@ def fetch_monitored_inventory():
                         raw_v_sku = v_node.get("sku", "").strip()
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
-                        
+                        inv_data = v_node.get("inventory") or {}
+
                         if not debug_printed:
-                            print(f"🔍 FULL VARIANT NODE DUMP: {json.dumps(v_node, indent=2)}")
+                            print(f"🔍 VARIANT INVENTORY OBJECT: {json.dumps(inv_data, indent=2)}")
                             debug_printed = True
 
-                        inv_data = v_node.get("inventory") or {}
-                        by_loc_data = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
-                        loc_edges = by_loc_data.get("edges", []) if isinstance(by_loc_data, dict) else []
-                        
-                        stock = 0
-                        for loc_edge in loc_edges:
-                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
-                            qty = loc_node.get("availableToSell")
-                            if qty is not None:
-                                stock += qty
+                        stock = 100 if inv_data.get("inStock") else 0
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -211,7 +198,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data for schema inspection...")
+    print("Fetching catalog data with inStock inspection...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
@@ -247,7 +234,7 @@ def sync_inventory_and_alert():
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
     if DISCORD_WEBHOOK_URL:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": "☕ **Schema Inspection Complete!** Check GitHub Action logs for variant structure."})
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": "☕ **inStock Check Complete!** Check logs for inventory fields."})
 
 
 if __name__ == "__main__":
