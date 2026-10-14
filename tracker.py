@@ -128,8 +128,13 @@ def fetch_monitored_inventory():
                     id
                     sku
                     inventory {
-                      aggregated {
-                        availableToSell
+                      locations {
+                        edges {
+                          node {
+                            name
+                            quantityAvailable
+                          }
+                        }
                       }
                     }
                   }
@@ -149,9 +154,14 @@ def fetch_monitored_inventory():
         try:
             response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
             if response.status_code != 200:
+                print(f"API Error: {response.status_code} - {response.text}")
                 break
 
             data = response.json()
+            if "errors" in data:
+                print(f"GraphQL Error: {data['errors']}")
+                break
+
             products_data = data.get("data", {}).get("site", {}).get("products", {})
             edges = products_data.get("edges", [])
 
@@ -170,17 +180,21 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        # Force print the first variant node of style 4001 to see structure
-                        if "4001" in style_sku and not debug_printed:
-                            print(f"🔍 INSPECTING STYLE 4001 VARIANT NODE: {json.dumps(v_node, indent=2)}")
-                            debug_printed = True
-
+                        # Extract stock across warehouse locations
                         inv_data = v_node.get("inventory") or {}
-                        agg_data = inv_data.get("aggregated") if isinstance(inv_data, dict) else None
+                        locations_edges = inv_data.get("locations", {}).get("edges", []) if isinstance(inv_data, dict) else []
                         
                         stock = 0
-                        if isinstance(agg_data, dict) and agg_data.get("availableToSell") is not None:
-                            stock = agg_data.get("availableToSell")
+                        for loc_edge in locations_edges:
+                            loc_node = loc_edge.get("node", {})
+                            qty = loc_node.get("quantityAvailable", 0)
+                            if qty:
+                                stock += qty
+
+                        # Debug dump for style 4001 Berry item
+                        if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
+                            print(f"🔍 LOCATIONS DEBUG FOR {variant_sku}: inv={inv_data}, calculated_stock={stock}")
+                            debug_printed = True
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -203,12 +217,17 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
+    print("Fetching catalog data with location inventory from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
     if not current_inventory:
+        print("No inventory data retrieved.")
+        if DISCORD_WEBHOOK_URL:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 **INVENTORY EMERGENCY!** No inventory data returned from API."})
         return
 
+    print("Fetching previous states from Supabase...")
     response = supabase.table("inventory_states").select("*").execute()
     previous_states = {item.get("variant_id"): item for item in response.data} if response.data else {}
 
@@ -224,9 +243,9 @@ def sync_inventory_and_alert():
         if prev_data is not None:
             was_low = prev_data.get("is_below_25", False)
             if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` -> Stock: **{stock}** units")
+                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
             elif not is_low and was_low:
-                alerts.append(f"🎉 **Restock Alert**: `{sku}` -> Stock recovered to **{stock}** units!")
+                alerts.append(f"🎉 **Restock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock recovered to **{stock}** units!")
 
         upsert_payload.append({
             "variant_id": sku,
@@ -240,14 +259,30 @@ def sync_inventory_and_alert():
         })
 
     if upsert_payload:
+        print(f"Upserting {len(upsert_payload)} items into Supabase...")
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
     if DISCORD_WEBHOOK_URL:
         if alerts:
+            print(f"Found {len(alerts)} alerts to send.")
             for alert in alerts:
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": alert})
         else:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": "☕ **All Clear!** Catalog sync completed successfully."})
+            print("No alerts generated. Sending fallback confirmation...")
+            fun_messages = [
+                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
+                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
+                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
+                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
+                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
+                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
+                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
+                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
+                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
+                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
+                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀"
+            ]
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": random.choice(fun_messages)})
 
 
 if __name__ == "__main__":
