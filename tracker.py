@@ -260,12 +260,15 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        inv_data = v_node.get("inventory", {}).get("aggregated", {})
-                        stock = inv_data.get("availableToSell", 0) if inv_data else 0
-
-                        # Debug log for style 4001 charcoal variants dumping full node
+                        inv_data = v_node.get("inventory", {})
+                        
+                        # Debug log to inspect raw inventory object
                         if "4001" in style_sku and "CHA" in variant_sku:
-                            print(f"DEBUG VARIANT NODE FOR {variant_sku}: {v_node}")
+                            print(f"DEBUG RAW INVENTORY FOR {variant_sku}: {inv_data}")
+
+                        stock = 0
+                        if inv_data and inv_data.get("aggregated"):
+                            stock = inv_data.get("aggregated", {}).get("availableToSell", 0)
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
