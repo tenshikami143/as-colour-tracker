@@ -267,9 +267,9 @@ def fetch_monitored_inventory():
                         if isinstance(agg_data, dict) and agg_data.get("availableToSell") is not None:
                             stock = agg_data.get("availableToSell")
 
-                        # Print debug for a specific item to see if inventory object has other keys
+                        # Dump full variant structure for Berry so we see what fields exist
                         if "4001" in style_sku and "BERRY" in variant_sku:
-                            print(f"DEBUG BERRY INV OBJECT: {inv_data}")
+                            print(f"🔍 FULL VARIANT DUMP FOR {variant_sku}: {json.dumps(v_node, indent=2)}")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
