@@ -21,12 +21,12 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install -r requirements.txt
+          playwright install chromium
 
       - name: Run Tracker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          ASCOLOUR_GRAPHQL_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python tracker.py
