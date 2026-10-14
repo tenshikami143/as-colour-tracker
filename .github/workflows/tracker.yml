@@ -2,29 +2,29 @@ name: AS Colour Inventory Tracker
 
 on:
   schedule:
-    # Runs daily at 6:00 AM Philippine Standard Time (22:00 UTC)
-    - cron: '0 22 * * *'
-  workflow_dispatch:
+    - cron: '0 */4 * * *'  # Runs every 4 hours (adjust as needed)
+  workflow_dispatch:      # Allows manual trigger from GitHub UI
 
 jobs:
-  run-tracker:
+  track-inventory:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run Tracker
         env:
-          PYTHONUNBUFFERED: "1"
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ASCOLOUR_GRAPHQL_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
