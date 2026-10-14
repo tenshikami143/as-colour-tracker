@@ -1,4 +1,5 @@
 import os
+import time
 import random
 import base64
 import json
@@ -11,7 +12,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour Australia GraphQL API credentials
+# AS Colour Australia GraphQL API (only used to look up product IDs for each style)
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
@@ -20,14 +21,33 @@ if raw_token and raw_token.lower().startswith("bearer "):
 else:
     API_TOKEN = raw_token
 
+# AS Colour's live stock API (the one the bulk order grid on the website uses)
+STOCK_API_URL = "https://u43tbzpa7g.execute-api.ap-southeast-2.amazonaws.com/production//catalog/products"
+STOCK_API_HEADERS = {
+    "Accept": "application/json",
+    "Origin": "https://www.ascolour.com.au",
+    "Referer": "https://www.ascolour.com.au/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+}
+STOCK_BATCH_SIZE = 10  # how many product IDs to request per call
+
+# Optional: hard-code {style_sku: product_id} to skip the GraphQL lookup (and the token) completely.
+# Run once with PRINT_IDS=1 to get this dictionary printed in the log, then paste it here.
+STYLE_PRODUCT_IDS = {
+    # "4001": 416,
+    # "3005": 247,
+}
+
 # Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# Optional switches (set as env vars / GitHub Actions secrets or workflow env)
+# Optional switches (set as env vars in the workflow)
 #   SEED_ONLY=1  -> write stock to Supabase but send NO low-stock alerts (use for the first run after a fix)
-#   DEBUG_RAW=1  -> print the raw inventory JSON of the first few variants so you can see what the API returns
+#   DEBUG_RAW=1  -> print a few raw variants so you can see what the API returns
+#   PRINT_IDS=1  -> print the {style: product_id} dictionary found via GraphQL
 SEED_ONLY = os.environ.get("SEED_ONLY") == "1"
 DEBUG_RAW = os.environ.get("DEBUG_RAW") == "1"
+PRINT_IDS = os.environ.get("PRINT_IDS") == "1"
 
 # If more than this share of variants come back without a stock number, treat the scan as broken
 MAX_NO_DATA_RATIO = 0.5
@@ -91,7 +111,7 @@ SIZE_MAP = {
     "MED": "Medium",
     "LGE": "Large",
     "XLG": "XL",
-    # Current short codes (e.g. 4001-BERRY-G-S -> "S")
+    # Current short codes
     "XS": "XS",
     "S": "Small",
     "M": "Medium",
@@ -119,10 +139,9 @@ def post_discord(content):
 
 def parse_sku_attributes(variant_sku):
     """
-    Handles SKUs like:
-      4001-BERRY-G-S      (style-colour-sortLetter-size)  -> Berry / Small
-      4001-BRI_R-F-XS     -> Bright Royal / XS
-      3001-BLACK-SML      (older style-colour-size)       -> Black / Small
+    Fallback parser, used only when the API gives no option_values. Handles SKUs like:
+      4001-BERRY-G-S      -> Berry / Small
+      3001-BLACK-SML      -> Black / Small
       xxxx-BLACK-P-Os     -> Black / One Size
       xxxx-BLACK-Q-3-6    -> Black / 3-6 Months
     """
@@ -158,18 +177,36 @@ def parse_sku_attributes(variant_sku):
     return colour, size
 
 
-def extract_stock(v_node):
-    """
-    Returns an int, or None when the API gave us no stock number.
-    (None is NOT the same as 0 - never store it as 0.)
-    """
-    inventory = v_node.get("inventory")
-    if not inventory:
-        return None
-    aggregated = inventory.get("aggregated")
-    if not aggregated:
-        return None
-    value = aggregated.get("availableToSell")
+def attributes_from_variant(variant, variant_sku):
+    """Colour/size from the API's option_values, falling back to the SKU."""
+    colour = None
+    size = None
+    for ov in variant.get("option_values") or []:
+        option_name = (ov.get("option_display_name") or "").strip().lower()
+        label = (ov.get("label") or "").strip()
+        if not label:
+            continue
+        if option_name in ("colour", "color"):
+            colour = label
+        elif option_name == "size":
+            size = label
+
+    sku_colour, sku_size = parse_sku_attributes(variant_sku)
+
+    if colour:
+        colour = COLOUR_MAP.get(colour, colour.replace("_", " ").title())
+    else:
+        colour = sku_colour
+
+    if size:
+        size = SIZE_MAP.get(size, size)
+    else:
+        size = sku_size
+
+    return colour, size
+
+
+def to_int(value):
     if value is None:
         return None
     try:
@@ -206,39 +243,21 @@ def check_token_expiration_and_alert():
 
 
 # ---------------------------------------------------------------------------
-# GraphQL fetching
+# Step 1: find the product ID of each target style (GraphQL, needs the token)
 # ---------------------------------------------------------------------------
 
-CATALOG_QUERY = """
-query FetchCatalog($productCursor: String) {
+PRODUCT_ID_QUERY = """
+query ProductIds($cursor: String) {
   site {
-    products(first: 50, after: $productCursor) {
+    products(first: 50, after: $cursor) {
       pageInfo {
         hasNextPage
         endCursor
       }
       edges {
         node {
-          id
-          name
+          entityId
           sku
-          variants(first: 50) {
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            edges {
-              node {
-                id
-                sku
-                inventory {
-                  aggregated {
-                    availableToSell
-                  }
-                }
-              }
-            }
-          }
         }
       }
     }
@@ -246,85 +265,122 @@ query FetchCatalog($productCursor: String) {
 }
 """
 
-MORE_VARIANTS_QUERY = """
-query MoreVariants($id: ID!, $variantCursor: String) {
-  node(id: $id) {
-    ... on Product {
-      variants(first: 50, after: $variantCursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        edges {
-          node {
-            id
-            sku
-            inventory {
-              aggregated {
-                availableToSell
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
 
-_warned_graphql_errors = False
+def discover_product_ids():
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
 
+    found = {}
+    cursor = None
+    has_next = True
 
-def gql(query, variables, headers):
-    """POST a GraphQL query. Returns the parsed JSON, or None on a hard failure."""
-    global _warned_graphql_errors
-    try:
-        response = requests.post(
-            GRAPHQL_URL,
-            json={"query": query, "variables": variables},
-            headers=headers,
-            timeout=60,
-        )
-    except Exception as e:
-        print(f"Request Exception: {e}")
-        return None
+    while has_next:
+        try:
+            response = requests.post(
+                GRAPHQL_URL,
+                json={"query": PRODUCT_ID_QUERY, "variables": {"cursor": cursor}},
+                headers=headers,
+                timeout=60,
+            )
+        except Exception as e:
+            print(f"GraphQL request exception: {e}")
+            break
 
-    if response.status_code != 200:
-        print(f"API Error: {response.status_code} - {response.text[:500]}")
-        return None
+        if response.status_code != 200:
+            print(f"GraphQL API Error: {response.status_code} - {response.text[:500]}")
+            break
 
-    data = response.json()
-
-    if data.get("errors"):
-        # Some errors (e.g. a field you're not permitted to read) still come back with partial data.
-        if not _warned_graphql_errors:
+        data = response.json()
+        if data.get("errors") and not data.get("data"):
             print(f"GraphQL Error(s): {data['errors']}")
-            _warned_graphql_errors = True
-        if not data.get("data"):
-            return None
+            break
 
-    return data
+        products = ((data.get("data") or {}).get("site") or {}).get("products") or {}
+        for edge in products.get("edges", []) or []:
+            node = edge.get("node") or {}
+            sku = (node.get("sku") or "").strip()
+            entity_id = node.get("entityId")
+            if sku in TARGET_STYLES and entity_id:
+                found[sku] = entity_id
+
+        page_info = products.get("pageInfo") or {}
+        has_next = page_info.get("hasNextPage", False)
+        cursor = page_info.get("endCursor")
+
+    return found
 
 
-def collect_variants(style_sku, product_name, variant_edges, scanned_items, stats):
-    for v_edge in variant_edges:
-        v_node = v_edge.get("node") or {}
-        variant_sku = (v_node.get("sku") or "").strip()
+# ---------------------------------------------------------------------------
+# Step 2: read live stock from AS Colour's stock API (same one the website grid uses)
+# ---------------------------------------------------------------------------
+
+def fetch_stock_batch(product_ids, label=""):
+    """Returns a list of product dicts, or None if the request failed."""
+    ids_param = ",".join(str(i) for i in product_ids)
+    url = f"{STOCK_API_URL}?product_ids={ids_param}&customer_email="
+
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=STOCK_API_HEADERS, timeout=60)
+        except Exception as e:
+            print(f"Stock API request exception {label}: {e}")
+            time.sleep(2)
+            continue
+
+        if response.status_code != 200:
+            print(f"Stock API error {label}: {response.status_code} - {response.text[:300]}")
+            time.sleep(2)
+            continue
+
+        try:
+            data = response.json()
+        except ValueError:
+            print(f"Stock API returned non-JSON {label}: {response.text[:300]}")
+            time.sleep(2)
+            continue
+
+        if isinstance(data, list) and data:
+            return data
+
+        print(f"Stock API returned an empty result {label} (attempt {attempt + 1}/3)")
+        time.sleep(2)
+
+    return None
+
+
+def collect_product(product, scanned_items, stats):
+    style_sku = (product.get("sku") or "").strip()
+    product_name = (product.get("name") or "").strip()
+
+    if style_sku not in TARGET_STYLES:
+        return
+
+    stats["styles_found"].add(style_sku)
+    product_level_stock = to_int(product.get("inventory_level"))
+    tracked_per_product = product.get("inventory_tracking") == "product"
+
+    for variant in product.get("variants") or []:
+        variant_sku = (variant.get("sku") or "").strip()
         if not variant_sku:
             continue
 
         stats["seen"] += 1
 
+        stock = to_int(variant.get("inventory_level"))
+        if stock is None and tracked_per_product:
+            stock = product_level_stock
+
         if DEBUG_RAW and stats["debug_printed"] < 5:
-            print(f"[DEBUG_RAW] {variant_sku}: {json.dumps(v_node.get('inventory'))}")
+            print(f"[DEBUG_RAW] {variant_sku}: inventory_level={variant.get('inventory_level')!r}, "
+                  f"option_values={json.dumps(variant.get('option_values'))}")
             stats["debug_printed"] += 1
 
-        stock = extract_stock(v_node)
         if stock is None:
             stats["no_data"] += 1
             continue  # never store "unknown" as 0
 
-        colour, size = parse_sku_attributes(variant_sku)
+        colour, size = attributes_from_variant(variant, variant_sku)
         scanned_items[variant_sku] = {
             "style_sku": style_sku,
             "product_name": product_name,
@@ -335,52 +391,43 @@ def collect_variants(style_sku, product_name, variant_edges, scanned_items, stat
 
 
 def fetch_monitored_inventory():
-    headers = {"Content-Type": "application/json"}
-    if API_TOKEN:
-        headers["Authorization"] = f"Bearer {API_TOKEN}"
-
     scanned_items = {}
-    stats = {"seen": 0, "no_data": 0, "debug_printed": 0}
-    has_next_products = True
-    product_cursor = None
+    stats = {"seen": 0, "no_data": 0, "debug_printed": 0, "styles_found": set(), "ids_ok": True}
 
-    while has_next_products:
-        data = gql(CATALOG_QUERY, {"productCursor": product_cursor}, headers)
-        if data is None:
-            break
+    style_ids = dict(STYLE_PRODUCT_IDS)
+    if not style_ids:
+        print("Looking up product IDs via GraphQL...")
+        style_ids = discover_product_ids()
+        if PRINT_IDS:
+            print("STYLE_PRODUCT_IDS = " + json.dumps(dict(sorted(style_ids.items())), indent=4))
 
-        products_data = (data.get("data") or {}).get("site", {}).get("products", {}) or {}
-        edges = products_data.get("edges", []) or []
+    if not style_ids:
+        stats["ids_ok"] = False
+        return scanned_items, stats
 
-        for edge in edges:
-            product = edge.get("node") or {}
-            style_sku = (product.get("sku") or "").strip()
-            product_name = (product.get("name") or "").strip()
+    missing_ids = [s for s in TARGET_STYLES if s not in style_ids]
+    if missing_ids:
+        print(f"No product ID found for styles: {', '.join(missing_ids)}")
 
-            if style_sku not in TARGET_STYLES:
-                continue
+    id_list = sorted(set(style_ids.values()))
+    for i in range(0, len(id_list), STOCK_BATCH_SIZE):
+        batch = id_list[i:i + STOCK_BATCH_SIZE]
+        products = fetch_stock_batch(batch, label=f"(ids {batch[0]}..{batch[-1]})")
 
-            variants_conn = product.get("variants") or {}
-            collect_variants(style_sku, product_name, variants_conn.get("edges", []) or [], scanned_items, stats)
+        if products is None and len(batch) > 1:
+            # The batch failed: retry each product on its own
+            products = []
+            for pid in batch:
+                single = fetch_stock_batch([pid], label=f"(id {pid})")
+                if single:
+                    products.extend(single)
 
-            # Page through the rest of this product's variants (the first page only holds 50)
-            v_page = variants_conn.get("pageInfo") or {}
-            while v_page.get("hasNextPage"):
-                more = gql(
-                    MORE_VARIANTS_QUERY,
-                    {"id": product.get("id"), "variantCursor": v_page.get("endCursor")},
-                    headers,
-                )
-                if more is None:
-                    break
-                more_conn = ((more.get("data") or {}).get("node") or {}).get("variants") or {}
-                collect_variants(style_sku, product_name, more_conn.get("edges", []) or [], scanned_items, stats)
-                v_page = more_conn.get("pageInfo") or {}
+        for product in products or []:
+            collect_product(product, scanned_items, stats)
 
-        page_info = products_data.get("pageInfo") or {}
-        has_next_products = page_info.get("hasNextPage", False)
-        product_cursor = page_info.get("endCursor")
+        time.sleep(0.5)
 
+    stats["missing_styles"] = [s for s in TARGET_STYLES if s not in stats["styles_found"]]
     return scanned_items, stats
 
 
@@ -389,28 +436,33 @@ def fetch_monitored_inventory():
 # ---------------------------------------------------------------------------
 
 def sync_inventory_and_alert():
-    # Check token health first
-    check_token_expiration_and_alert()
+    # Token only matters when product IDs are looked up through GraphQL
+    if not STYLE_PRODUCT_IDS:
+        check_token_expiration_and_alert()
 
-    print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
+    print("Fetching live stock from AS Colour Australia...")
     current_inventory, stats = fetch_monitored_inventory()
     print(
         f"Variants seen: {stats['seen']} | with stock data: {len(current_inventory)} | "
-        f"no stock data: {stats['no_data']}"
+        f"no stock data: {stats['no_data']} | styles found: {len(stats['styles_found'])}"
     )
+    if stats.get("missing_styles"):
+        print(f"Styles with no data: {', '.join(stats['missing_styles'])}")
+
+    if not stats["ids_ok"]:
+        print("Could not get product IDs. Sending alert.")
+        post_discord(
+            "🚨 **INVENTORY EMERGENCY!** Couldn't look up the product IDs (the GraphQL token is probably missing or expired). "
+            "Nothing was written to the database. Grab a fresh token and update the GitHub secret!"
+        )
+        return
 
     if not current_inventory:
         print("No inventory data retrieved. Sending scan failure alert.")
-        if stats["seen"] > 0:
-            post_discord(
-                f"🚨 **INVENTORY EMERGENCY!** The tracker found {stats['seen']} variants but **none** returned a stock number. "
-                "The token probably can't read inventory (or AS Colour changed the field). Nothing was written to the database."
-            )
-        else:
-            post_discord(
-                "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* (0 items). "
-                "Either AS Colour put up a firewall or ghosts stole the warehouse. Check your token/API immediately!"
-            )
+        post_discord(
+            "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* "
+            "(no stock numbers from the stock API). Nothing was written to the database. Check the Action log!"
+        )
         return
 
     # If a big share of variants had no stock number, the scan is unreliable - don't touch the DB
@@ -418,7 +470,7 @@ def sync_inventory_and_alert():
         print("Too many variants without stock data. Aborting before writing to Supabase.")
         post_discord(
             f"⚠️ **PARTIAL DATA:** {stats['no_data']} of {stats['seen']} variants returned no stock number, "
-            "so this scan was skipped to avoid saving wrong zeros. Check the token permissions / API response."
+            "so this scan was skipped to avoid saving wrong zeros. Check the Action log."
         )
         return
 
