@@ -8,18 +8,17 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ASCOLOUR_GRAPHQL_TOKEN = os.getenv("ASCOLOUR_GRAPHQL_TOKEN")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# AS Colour Public Storefront / B2B GraphQL Endpoint
-GRAPHQL_URL = "https://www.ascolour.com.au/graphql"  # Update if using a specific storefront domain endpoint
+GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 
+# Only include authorization if the token secret is provided and non-empty
 HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}" if ASCOLOUR_GRAPHQL_TOKEN else ""
+    "Content-Type": "application/json"
 }
+if ASCOLOUR_GRAPHQL_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {ASCOLOUR_GRAPHQL_TOKEN}"
 
-# Target 73 Style SKUs (modify/expand list as needed based on your parser setup)
 TARGET_STYLES = [
     "4001", "4026", "4051", "4008", "4079", "4006", "4125", "4161", "4160", "1117", "1160"
-    # ... include your full 73 style list here
 ]
 
 GRAPHQL_QUERY = """
@@ -78,7 +77,6 @@ def fetch_inventory_for_style(style_sku):
                 v_node = v_edge.get("node", {})
                 inventory_info = v_node.get("inventory", {}) or {}
                 
-                # Check isInStock boolean or fallback value
                 is_in_stock = inventory_info.get("isInStock", False)
                 stock_indicator = 1 if is_in_stock else 0
                 
@@ -135,7 +133,6 @@ def main():
         print(f"Scanned {len(all_records)} target variants from API.")
     else:
         print("No inventory data retrieved.")
-        send_discord_alert("⚠️ Inventory Tracker warning: No inventory data was retrieved during the latest run.")
 
 if __name__ == "__main__":
     main()
