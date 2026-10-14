@@ -24,9 +24,12 @@ jobs:
           pip install -r requirements.txt
           playwright install chromium
 
-      - name: Run Tracker
+            - name: Run Tracker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ASCOLOUR_GRAPHQL_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DEBUG_RAW: "1"
+          SEED_ONLY: "1"
         run: python tracker.py
