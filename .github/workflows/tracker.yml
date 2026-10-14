@@ -2,13 +2,14 @@ name: AS Colour Inventory Tracker
 
 on:
   schedule:
-    # Once a day. GitHub cron is in UTC, format is: minute hour day month weekday
-    # To set your time, convert it to UTC. Examples:
-    #   9:00 AM Philippines (UTC+8)     ->  '0 1 * * *'
-    #   9:00 AM Sydney/Melbourne (AEDT, UTC+11, Oct-Apr)  ->  '0 22 * * *'
-    #   9:00 AM Brisbane (AEST, UTC+10) ->  '0 23 * * *'
-    - cron: '0 1 * * *'
-  workflow_dispatch:      # Allows manual trigger from the GitHub Actions tab
+    # Wakes up every hour. The script checks the schedule you set in the admin app
+    # and only does the real work once a day, at the first check after your chosen time.
+    - cron: '0 * * * *'
+  workflow_dispatch:      # "Run workflow" button here, or "Run now" in the admin app
+
+concurrency:
+  group: as-colour-tracker
+  cancel-in-progress: false
 
 jobs:
   track-inventory:
@@ -22,6 +23,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install Dependencies
         run: |
@@ -34,6 +37,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # A manual run (button) ignores the schedule and the pause switch
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: python tracker.py
 
       # Safety net: if anything failed and the script didn't already post its own alert
