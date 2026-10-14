@@ -109,6 +109,7 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
+    # Using standard LocationConnection pattern: edges -> node -> availableToSell
     query = """
     query FetchCatalog($productCursor: String) {
       site {
@@ -129,9 +130,10 @@ def fetch_monitored_inventory():
                     sku
                     inventory {
                       byLocation {
-                        availableToSell
-                        location {
-                          name
+                        edges {
+                          node {
+                            availableToSell
+                          }
                         }
                       }
                     }
@@ -180,15 +182,18 @@ def fetch_monitored_inventory():
                         inv_data = v_node.get("inventory") or {}
 
                         if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
-                            print(f"🔍 RAW INVENTORY BY-LOCATION FOR BERRY: {json.dumps(inv_data, indent=2)}")
+                            print(f"🔍 BERRY INVENTORY BY-LOCATION NODE: {json.dumps(inv_data, indent=2)}")
                             debug_printed = True
 
-                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else []
+                        by_loc_data = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
+                        loc_edges = by_loc_data.get("edges", []) if isinstance(by_loc_data, dict) else []
+                        
                         stock = 0
-                        if isinstance(by_location, list):
-                            for loc in by_location:
-                                if isinstance(loc, dict) and loc.get("availableToSell") is not None:
-                                    stock += loc.get("availableToSell")
+                        for loc_edge in loc_edges:
+                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
+                            qty = loc_node.get("availableToSell")
+                            if qty is not None:
+                                stock += qty
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -211,7 +216,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with byLocation inventory inspection...")
+    print("Fetching catalog data with properly structured LocationConnection...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
@@ -268,13 +273,7 @@ def sync_inventory_and_alert():
                 "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
                 "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
                 "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
-                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
-                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
-                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
-                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
-                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
-                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
-                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀"
+                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎"
             ]
             requests.post(DISCORD_WEBHOOK_URL, json={"content": random.choice(fun_messages)})
 
