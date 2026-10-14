@@ -214,7 +214,6 @@ def fetch_monitored_inventory():
                     inventory {
                       aggregated {
                         availableToSell
-                        onHand
                       }
                     }
                   }
@@ -261,20 +260,16 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        # Extract stock using aggregated subfields
                         inv_data = v_node.get("inventory") or {}
                         agg_data = inv_data.get("aggregated") if isinstance(inv_data, dict) else None
                         
                         stock = 0
-                        if isinstance(agg_data, dict):
-                            if agg_data.get("availableToSell") is not None:
-                                stock = agg_data.get("availableToSell")
-                            elif agg_data.get("onHand") is not None:
-                                stock = agg_data.get("onHand")
+                        if isinstance(agg_data, dict) and agg_data.get("availableToSell") is not None:
+                            stock = agg_data.get("availableToSell")
 
-                        # Detailed debug log for sample style 4001 Berry item
+                        # Print debug for a specific item to see if inventory object has other keys
                         if "4001" in style_sku and "BERRY" in variant_sku:
-                            print(f"DEBUG BERRY INVENTORY: inv={inv_data}, stock={stock}")
+                            print(f"DEBUG BERRY INV OBJECT: {inv_data}")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
