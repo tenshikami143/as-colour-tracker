@@ -129,7 +129,11 @@ def fetch_monitored_inventory():
                     sku
                     inventory {
                       byLocation {
-                        availableToSell
+                        edges {
+                          node {
+                            availableToSell
+                          }
+                        }
                       }
                     }
                   }
@@ -175,15 +179,17 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        # Extract stock across byLocation entries
+                        # Extract stock across byLocation edges/nodes
                         inv_data = v_node.get("inventory") or {}
-                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else []
+                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
+                        loc_edges = by_location.get("edges", []) if isinstance(by_location, dict) else []
                         
                         stock = 0
-                        if isinstance(by_location, list):
-                            for loc in by_location:
-                                if isinstance(loc, dict) and loc.get("availableToSell") is not None:
-                                    stock += loc.get("availableToSell")
+                        for loc_edge in loc_edges:
+                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
+                            val = loc_node.get("availableToSell")
+                            if val is not None:
+                                stock += val
 
                         # Debug dump for style 4001 Berry item
                         if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
@@ -211,7 +217,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with byLocation inventory from AS Colour Australia...")
+    print("Fetching catalog data with correct byLocation inventory from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
