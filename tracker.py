@@ -124,7 +124,13 @@ def fetch_monitored_inventory():
                     id
                     sku
                     inventory {
-                      quantityAvailable
+                      byLocation {
+                        edges {
+                          node {
+                            availableToSell
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -168,15 +174,21 @@ def fetch_monitored_inventory():
                         raw_v_sku = v_node.get("sku", "").strip()
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
-                        inv_data = v_node.get("inventory") or {}
-
+                        
                         if not debug_printed:
-                            print(f"🔍 INVENTORY OBJECT DUMP ({raw_v_sku}): {json.dumps(inv_data, indent=2)}")
+                            print(f"🔍 FULL VARIANT NODE DUMP: {json.dumps(v_node, indent=2)}")
                             debug_printed = True
 
+                        inv_data = v_node.get("inventory") or {}
+                        by_loc_data = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
+                        loc_edges = by_loc_data.get("edges", []) if isinstance(by_loc_data, dict) else []
+                        
                         stock = 0
-                        if isinstance(inv_data, dict):
-                            stock = inv_data.get("quantityAvailable", 0) or 0
+                        for loc_edge in loc_edges:
+                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
+                            qty = loc_node.get("availableToSell")
+                            if qty is not None:
+                                stock += qty
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -199,21 +211,18 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with direct quantityAvailable inventory...")
+    print("Fetching catalog data for schema inspection...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
     if not current_inventory:
         print("No inventory data retrieved.")
-        if DISCORD_WEBHOOK_URL:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 **INVENTORY EMERGENCY!** No inventory data returned from API."})
         return
 
     print("Fetching previous states from Supabase...")
     response = supabase.table("inventory_states").select("*").execute()
     previous_states = {item.get("variant_id"): item for item in response.data} if response.data else {}
 
-    alerts = []
     upsert_payload = []
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -221,13 +230,6 @@ def sync_inventory_and_alert():
         stock = item_data["stock"]
         prev_data = previous_states.get(sku)
         is_low = stock < 25
-
-        if prev_data is not None:
-            was_low = prev_data.get("is_below_25", False)
-            if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
-            elif not is_low and was_low:
-                alerts.append(f"🎉 **Restock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock recovered to **{stock}** units!")
 
         upsert_payload.append({
             "variant_id": sku,
@@ -245,20 +247,7 @@ def sync_inventory_and_alert():
         supabase.table("inventory_states").upsert(upsert_payload).execute()
 
     if DISCORD_WEBHOOK_URL:
-        if alerts:
-            print(f"Found {len(alerts)} alerts to send.")
-            for alert in alerts:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": alert})
-        else:
-            print("No alerts generated. Sending fallback confirmation...")
-            fun_messages = [
-                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
-                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
-                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
-                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
-                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎"
-            ]
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": random.choice(fun_messages)})
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": "☕ **Schema Inspection Complete!** Check GitHub Action logs for variant structure."})
 
 
 if __name__ == "__main__":
