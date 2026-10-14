@@ -2,8 +2,13 @@ name: AS Colour Inventory Tracker
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # Runs every 4 hours
-  workflow_dispatch:       # Allows manual trigger from GitHub UI
+    # Once a day. GitHub cron is in UTC, format is: minute hour day month weekday
+    # To set your time, convert it to UTC. Examples:
+    #   9:00 AM Philippines (UTC+8)     ->  '0 1 * * *'
+    #   9:00 AM Sydney/Melbourne (AEDT, UTC+11, Oct-Apr)  ->  '0 22 * * *'
+    #   9:00 AM Brisbane (AEST, UTC+10) ->  '0 23 * * *'
+    - cron: '0 1 * * *'
+  workflow_dispatch:      # Allows manual trigger from the GitHub Actions tab
 
 jobs:
   track-inventory:
@@ -22,14 +27,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install chromium
 
       - name: Run Tracker
+        timeout-minutes: 15
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          ASCOLOUR_GRAPHQL_TOKEN: ${{ secrets.ASCOLOUR_GRAPHQL_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DEBUG_RAW: "1"
-          SEED_ONLY: "1"
         run: python tracker.py
+
+      # Safety net: if anything failed and the script didn't already post its own alert
+      # (e.g. the install step broke, or the script couldn't even start), tell Discord.
+      - name: Notify Discord if the run failed
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -f notified.flag ]; then
+            echo "The tracker already sent its own failure alert."
+            exit 0
+          fi
+          curl -sS -H "Content-Type: application/json" \
+            -d "{\"content\": \"🚨 **TRACKER RUN FAILED!** The workflow stopped before finishing. Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$DISCORD_WEBHOOK_URL"
