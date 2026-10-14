@@ -6,10 +6,12 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
+# Initialize Supabase credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
@@ -18,8 +20,10 @@ if raw_token and raw_token.lower().startswith("bearer "):
 else:
     API_TOKEN = raw_token
 
+# Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
+# Monitored Scope (73 Target Styles)
 TARGET_STYLES = [
     "1000", "1001", "1002", "1117", "3001", "3003", "3005", "3006", "3009", "3010",
     "3030", "3031", "3032", "3033", "3034", "3035", "3036", "3037", "4001", "4001g",
@@ -31,44 +35,121 @@ TARGET_STYLES = [
     "5161", "5162", "5402"
 ]
 
+# Translation dictionaries for cleaner readability
 COLOUR_MAP = {
-    "ARC_B": "Arctic Blue", "ARMY": "Army", "ASH": "Ash", "ASP_M": "Asphalt Marle",
-    "BBGUM": "Bubblegum", "BL/WH": "Black/White", "BLACK": "Black", "BLA_A": "Black Acid",
-    "BLU_A": "Blue Acid", "BONE": "Bone", "BRI_R": "Bright Royal", "BURGU": "Burgundy",
-    "BUTTR": "Butter", "CARDI": "Cardinal", "CAR_B": "Carolina Blue", "CHARC": "Charcoal",
-    "CHA_P": "Charcoal", "COAL": "Coal", "COBLT": "Cobalt", "COPPR": "Copper",
-    "CREAM": "Cream", "ECRU": "Ecru", "EMRLD": "Emerald", "EUCAL": "Eucalyptus",
-    "FORES": "Forest Green", "F_ARM": "Faded Army", "F_BLK": "Faded Black", "F_BLU": "Faded Blue",
-    "F_DUS": "Faded Dust", "F_MUS": "Faded Mustard", "F_ROS": "Faded Rose", "F_SLT": "Faded Slate",
-    "GOLD": "Gold", "GRE_M": "Grey Marle", "GR_AS": "Grey Acid", "H_PNK": "Hot Pink",
-    "KEL_G": "Kelly Green", "KHAKI": "Khaki", "LAGON": "Lagoon", "MID_B": "Mid Blue",
-    "MOSS": "Moss Green", "NAT_R": "Natural", "NAVY": "Navy", "ORCHD": "Orchid",
-    "ORCHI": "Orchid", "PETRL": "Petrol Blue", "PINE": "Pine Green", "PINK": "Pink",
-    "POWDR": "Powder", "P_BLU": "Powder Blue", "P_PNK": "Powder Pink", "RED": "Red",
-    "SAGE": "Sage", "SNSET": "Sunset", "Snset": "Sunset", "STORM": "Storm",
-    "WALNT": "Walnut", "WH/RE": "White/Red", "WHITE": "White", "WHI_B": "White/Black",
-    "WHI_M": "White Marle", "WHI_N": "White/Navy", "DAR_C": "Dark Charcoal",
-    "LBRTY": "Liberty", "MUSH": "Mushroom", "MUSTA": "Mustard", "ORANG": "Orange"
+    "ARC_B": "Arctic Blue",
+    "ARMY": "Army",
+    "ASH": "Ash",
+    "ASP_M": "Asphalt Marle",
+    "BBGUM": "Bubblegum",
+    "BL/WH": "Black/White",
+    "BLACK": "Black",
+    "BLA_A": "Black Acid",
+    "BLU_A": "Blue Acid",
+    "BONE": "Bone",
+    "BRI_R": "Bright Royal",
+    "BURGU": "Burgundy",
+    "BUTTR": "Butter",
+    "CARDI": "Cardinal",
+    "CAR_B": "Carolina Blue",
+    "CHARC": "Charcoal",
+    "CHA_P": "Charcoal",
+    "COAL": "Coal",
+    "COBLT": "Cobalt",
+    "COPPR": "Copper",
+    "CREAM": "Cream",
+    "ECRU": "Ecru",
+    "EMRLD": "Emerald",
+    "EUCAL": "Eucalyptus",
+    "FORES": "Forest Green",
+    "F_ARM": "Faded Army",
+    "F_BLK": "Faded Black",
+    "F_BLU": "Faded Blue",
+    "F_DUS": "Faded Dust",
+    "F_MUS": "Faded Mustard",
+    "F_ROS": "Faded Rose",
+    "F_SLT": "Faded Slate",
+    "GOLD": "Gold",
+    "GRE_M": "Grey Marle",
+    "GR_AS": "Grey Acid",
+    "H_PNK": "Hot Pink",
+    "KEL_G": "Kelly Green",
+    "KHAKI": "Khaki",
+    "LAGON": "Lagoon",
+    "MID_B": "Mid Blue",
+    "MOSS": "Moss Green",
+    "NAT_R": "Natural",
+    "NAVY": "Navy",
+    "ORCHD": "Orchid",
+    "ORCHI": "Orchid",
+    "PETRL": "Petrol Blue",
+    "PINE": "Pine Green",
+    "PINK": "Pink",
+    "POWDR": "Powder",
+    "P_BLU": "Powder Blue",
+    "P_PNK": "Powder Pink",
+    "RED": "Red",
+    "SAGE": "Sage",
+    "SNSET": "Sunset",
+    "Snset": "Sunset",
+    "STORM": "Storm",
+    "WALNT": "Walnut",
+    "WH/RE": "White/Red",
+    "WHITE": "White",
+    "WHI_B": "White/Black",
+    "WHI_M": "White Marle",
+    "WHI_N": "White/Navy",
+    "DAR_C": "Dark Charcoal",
+    "LBRTY": "Liberty",
+    "MUSH": "Mushroom",
+    "MUSTA": "Mustard",
+    "ORANG": "Orange"
 }
 
 SIZE_MAP = {
-    "F-XS": "XS", "G-S": "Small", "H-M": "Medium", "I-L": "Large", "J-XL": "XL",
-    "K-2XL": "2XL", "L-3XL": "3XL", "M-4XL": "4XL", "N-5XL": "5XL", "P-Os": "One Size",
-    "OS": "One Size", "P0-3": "0-3 Months", "Q3-6": "3-6 Months", "R6-12": "6-12 Months",
-    "00-03": "0-3 Months", "03-06": "3-6 Months", "06-12": "6-12 Months", "12-18": "12-18 Months",
-    "18-24": "18-24 Months", "S1218": "12-18 Months", "T1824": "18-24 Months",
-    "XSM": "XS", "SML": "Small", "MED": "Medium", "LGE": "Large", "XLG": "XL", "2XL": "2XL", "3XL": "3XL"
+    "F-XS": "XS",
+    "G-S": "Small",
+    "H-M": "Medium",
+    "I-L": "Large",
+    "J-XL": "XL",
+    "K-2XL": "2XL",
+    "L-3XL": "3XL",
+    "M-4XL": "4XL",
+    "N-5XL": "5XL",
+    "P-Os": "One Size",
+    "OS": "One Size",
+    "P0-3": "0-3 Months",
+    "Q3-6": "3-6 Months",
+    "R6-12": "6-12 Months",
+    "00-03": "0-3 Months",
+    "03-06": "3-6 Months",
+    "06-12": "6-12 Months",
+    "12-18": "12-18 Months",
+    "18-24": "18-24 Months",
+    "S1218": "12-18 Months",
+    "T1824": "18-24 Months",
+    "XSM": "XS",
+    "SML": "Small",
+    "MED": "Medium",
+    "LGE": "Large",
+    "XLG": "XL",
+    "2XL": "2XL",
+    "3XL": "3XL"
 }
+
 
 def parse_sku_attributes(variant_sku):
     parts = variant_sku.split("-")
     if len(parts) >= 3:
         raw_colour = parts[1]
         raw_size = "-".join(parts[2:])
+        
         colour = COLOUR_MAP.get(raw_colour, raw_colour.replace("_", " ").title())
         size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
+        
         return colour, size
     return "N/A", "N/A"
+
 
 def check_token_expiration_and_alert():
     if not API_TOKEN or not DISCORD_WEBHOOK_URL:
@@ -79,19 +160,28 @@ def check_token_expiration_and_alert():
             return
         payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_part).decode("utf-8"))
+        
         eat = payload.get("eat")
         if eat:
             now_ts = datetime.now(timezone.utc).timestamp()
-            days_left = (eat - now_ts) / 86400
+            days_left = (eat - now_ts) / 86400  # Convert seconds to days
+            
             if days_left <= 0:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 Token expired!"})
+                msg = "🚨 **MAYDAY! THE TOKEN HAS OFFICIALLY KICKED THE BUCKET!** 🪦 AS Colour has locked us out in the cold. Drop what you're doing, grab a fresh token, and slap it into GitHub Secrets before the tees revolt!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print("Alert sent: Token expired.")
             elif days_left <= 5:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": f"⏳ Token expires in {round(days_left, 1)} days."})
+                msg = f"⏳ **TICK-TOCK!** Your AS Colour token is aging like fine milk and expires in **{round(days_left, 1)} days**. Get ahead of the chaos and grab a fresh token before this ship hits the iceberg!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print(f"Alert sent: Token expires in {round(days_left, 1)} days.")
     except Exception as e:
-        print(f"Token check error: {e}")
+        print(f"Error checking token expiration: {e}")
+
 
 def fetch_monitored_inventory():
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json"
+    }
     if API_TOKEN:
         headers["Authorization"] = f"Bearer {API_TOKEN}"
 
@@ -99,10 +189,11 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
+    # Safe pagination limits to avoid HTTP 400 Bad Request
     query = """
     query FetchCatalog($productCursor: String) {
       site {
-        products(first: 250, after: $productCursor) {
+        products(first: 50, after: $productCursor) {
           pageInfo {
             hasNextPage
             endCursor
@@ -112,7 +203,7 @@ def fetch_monitored_inventory():
               id
               name
               sku
-              variants(first: 250) {
+              variants(first: 100) {
                 edges {
                   node {
                     id
@@ -133,14 +224,21 @@ def fetch_monitored_inventory():
     """
 
     while has_next_products:
-        variables = {"productCursor": product_cursor}
+        variables = {
+            "productCursor": product_cursor
+        }
+
         try:
             response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
             if response.status_code != 200:
-                print(f"API Error: {response.status_code}")
+                print(f"API Error: {response.status_code} - {response.text}")
                 break
 
             data = response.json()
+            if "errors" in data:
+                print(f"GraphQL Error: {data['errors']}")
+                break
+
             products_data = data.get("data", {}).get("site", {}).get("products", {})
             edges = products_data.get("edges", [])
 
@@ -150,10 +248,13 @@ def fetch_monitored_inventory():
                 product_name = product.get("name", "").strip()
 
                 if style_sku in TARGET_STYLES:
-                    for v_edge in product.get("variants", {}).get("edges", []):
+                    variants = product.get("variants", {}).get("edges", [])
+                    for v_edge in variants:
                         v_node = v_edge.get("node", {})
                         variant_sku = v_node.get("sku", "").strip()
+                        
                         colour, size = parse_sku_attributes(variant_sku)
+
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
 
@@ -169,23 +270,26 @@ def fetch_monitored_inventory():
             page_info = products_data.get("pageInfo", {})
             has_next_products = page_info.get("hasNextPage", False)
             product_cursor = page_info.get("endCursor")
+
         except Exception as e:
             print(f"Request Exception: {e}")
             break
 
     return scanned_items
 
+
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
 
-    print("Fetching catalog data...")
+    print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
     if not current_inventory:
-        print("ERROR: No inventory data retrieved!")
+        print("No inventory data retrieved. Sending scan failure alert.")
         if DISCORD_WEBHOOK_URL:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚨 INVENTORY EMERGENCY: Scanned 0 items!"})
+            fail_msg = "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* (0 items). Either AS Colour put up a firewall or ghosts stole the warehouse. Check your token/API immediately!"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": fail_msg})
         return
 
     print("Fetching previous states from Supabase...")
@@ -212,6 +316,7 @@ def sync_inventory_and_alert():
 
         if prev_data is not None:
             was_low = prev_data.get("is_below_25", False)
+            
             if is_low and (not was_low or prev_data.get("stock_count") != stock):
                 alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
             elif not is_low and was_low:
@@ -242,8 +347,47 @@ def sync_inventory_and_alert():
                 print(f"Discord response code: {res.status_code}")
         else:
             print("No alerts generated. Sending fallback confirmation...")
-            res = requests.post(DISCORD_WEBHOOK_URL, json={"content": "🚀 **Tracker Run Complete:** All 73 styles checked successfully!"})
+            fun_messages = [
+                "☕ **All Clear!** No inventory fires to extinguish today. Grab a coffee and enjoy the smooth sailing! ☕",
+                "🚀 **Smooth Operations:** Stock levels are rock solid across all 73 styles today. Keep up the awesome work! 🚀",
+                "⏰ **Quiet Day in the Catalog:** Zero new low-stock items and zero restocks today. Everything's running like clockwork! ⏰",
+                "👏 **Inventory Status:** All quiet on the stock front today! Time to relax or tackle the fun stuff on your list. 👏",
+                "😎 **Beep Boop:** Scanned thousands of variants and found no threshold changes! Your inventory is chillin' today. 😎",
+                "🍩 **Zero Drama:** No stock alerts today! Treat yourself to a donut (or two) for a job well done. 🍩",
+                "💪 **Fort Knox Inventory:** All 73 monitored styles are fully stocked and holding the line today! 💪",
+                "🌊 **Smooth Sailing:** Not a single SKU dropped below 25 today. Breathe easy and have a fantastic morning! 🌊",
+                "🎯 **Bullseye!** Scanned every single variant with 100% precision—no restocks or low-stock drops to report. 🎯",
+                "🧘 **Inventory Zen:** Peaceful vibes in the database today. Everything is balanced and right where it needs to be. 🧘",
+                "🧑‍🚀 **All Systems Nominal:** The catalog check passed with zero stock alerts. Houston, we have zero problems! 🧑‍🚀",
+                "☕ **Pour Another Cup:** Everything is looking great across the catalog today. Sit back and enjoy your morning brew! ☕",
+                "✨ **Golden Ratio:** No new low stock, no restock chaos. Just a pristine, smooth inventory run! ✨",
+                "💤 **Sleeping Soundly:** The inventory warehouse is completely undisturbed today. Shhh, don't wake the tees! 💤",
+                "🥧 **Flawless Run:** Today's scan went smoother than butter. All monitored styles are safe and sound! 🥧",
+                "⚓ **On Course:** Staying steady on the high seas! Zero inventory emergencies detected in the last 24 hours. ⚓",
+                "🕶️ **Too Cool for Stock Outs:** Stock levels are staying comfortable today. Put on those shades and enjoy your morning! 🕶️",
+                "🏆 **Victory Lap:** No low-stock flags raised today! You're winning the inventory game. 🏆",
+                "🥑 **Holy Guacamole!** Another day, another completely clean inventory report. Keep crushing it! 🥑",
+                "🎮 **Level Complete:** Daily scan finished with 0 errors and 0 inventory alerts! Maximum score achieved. 🎮",
+                "🌈 **Sunshine & Rainbows:** Nothing but healthy stock numbers across all 73 styles today! 🌈",
+                "🤫 **Warehouse Whispers:** The shelves are quiet today. All target variants are staying right where they belong! 🤫",
+                "✈️ **Cruising Altitude:** 30,000 feet up and zero turbulence in the stock room today! ✈️",
+                "🎵 **Sweet Harmony:** All styles are in perfect sync today. Not a single stock alarm sounded! 🎵",
+                "🪄 **Inventory Wizardry:** Magic was worked overnight—no low stock, no missing sizes! 🪄",
+                "🧊 **Chill Zone:** Stock counts are cool, calm, and collected. Zero action required from you today! 🧊",
+                "🖼️ **Picture Perfect:** The inventory numbers look like a masterpiece today. Zero alerts on the horizon! 🖼️",
+                "⚡ **Fully Charged:** Stock counts across all monitored items are looking super healthy today! ⚡",
+                "🏅 **Gold Medal Day:** Clean sweep! All variants passed inspection with flying colors. 🏅",
+                "🌾 **Smooth Harvest:** The inventory fields are bountiful and stable today. Enjoy the peace! 🌾",
+                "⚡ **Lightning Fast & Quiet:** Scanned thousands of variants in seconds—zero stock threats found! ⚡",
+                "🍀 **Lucky Days:** No surprise out-of-stock events today. Lady Luck is on our side! 🍀",
+                "🚦 **Smooth Highway:** Cruising on green lights all morning. No inventory speed bumps today! 🚦",
+                "🏰 **Castle Guarded:** The inventory fortress remains untouched today. All stock holds firm! 🏰",
+                "🍕 **Pizza Time:** No inventory crises to handle today, so you've earned a pizza slice later! 🍕"
+            ]
+            selected_message = random.choice(fun_messages)
+            res = requests.post(DISCORD_WEBHOOK_URL, json={"content": selected_message})
             print(f"Discord fallback response code: {res.status_code}")
+
 
 if __name__ == "__main__":
     sync_inventory_and_alert()
