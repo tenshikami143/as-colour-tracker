@@ -139,7 +139,10 @@ SIZE_MAP = {
 
 
 def parse_sku_attributes(variant_sku):
-    parts = variant_sku.split("-")
+    # Automatically normalize old CHARC variants to CHA_P to unify records
+    normalized_sku = variant_sku.replace("-CHARC-", "-CHA_P-")
+    
+    parts = normalized_sku.split("-")
     if len(parts) >= 3:
         raw_colour = parts[1]
         raw_size = "-".join(parts[2:])
@@ -147,8 +150,8 @@ def parse_sku_attributes(variant_sku):
         colour = COLOUR_MAP.get(raw_colour, raw_colour.replace("_", " ").title())
         size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
         
-        return colour, size
-    return "N/A", "N/A"
+        return colour, size, normalized_sku
+    return "N/A", "N/A", variant_sku
 
 
 def check_token_expiration_and_alert():
@@ -189,7 +192,6 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
-    # Safe pagination limits to avoid HTTP 400 Bad Request
     query = """
     query FetchCatalog($productCursor: String) {
       site {
@@ -251,9 +253,9 @@ def fetch_monitored_inventory():
                     variants = product.get("variants", {}).get("edges", [])
                     for v_edge in variants:
                         v_node = v_edge.get("node", {})
-                        variant_sku = v_node.get("sku", "").strip()
+                        raw_v_sku = v_node.get("sku", "").strip()
                         
-                        colour, size = parse_sku_attributes(variant_sku)
+                        colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
@@ -300,10 +302,6 @@ def sync_inventory_and_alert():
         for item in response.data:
             v_id = item.get("variant_id")
             previous_states[v_id] = item
-            if "-CHA_P-" in v_id:
-                previous_states[v_id.replace("-CHA_P-", "-CHARC-")] = item
-            elif "-CHARC-" in v_id:
-                previous_states[v_id.replace("-CHARC-", "-CHA_P-")] = item
 
     alerts = []
     upsert_payload = []
