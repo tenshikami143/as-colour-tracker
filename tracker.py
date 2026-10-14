@@ -247,12 +247,12 @@ def fetch_monitored_inventory():
 
             for edge in edges:
                 product = edge.get("node", {})
-                style_sku = product.get("sku", "").strip()
+                style_sku = product.get("sku", "").strip().lower()
                 product_name = product.get("name", "").strip()
 
-                print(f"Scanned Style SKU from API: {style_sku}")
+                is_target = any(style_sku.startswith(target.lower()) for target in TARGET_STYLES)
 
-                if style_sku in TARGET_STYLES:
+                if is_target:
                     variants = product.get("variants", {}).get("edges", [])
                     for v_edge in variants:
                         v_node = v_edge.get("node", {})
@@ -263,13 +263,13 @@ def fetch_monitored_inventory():
                         inv_data = v_node.get("inventory", {}).get("aggregated", {})
                         stock = inv_data.get("availableToSell", 0) if inv_data else 0
 
-                        # Debug log for style 4001 charcoal variants
+                        # Debug log for style 4001 charcoal variants dumping full node
                         if "4001" in style_sku and "CHA" in variant_sku:
-                            print(f"DEBUG API STOCK FOR {variant_sku}: {stock} (Raw inv_data: {inv_data})")
+                            print(f"DEBUG VARIANT NODE FOR {variant_sku}: {v_node}")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
-                                "style_sku": style_sku,
+                                "style_sku": style_sku.upper(),
                                 "product_name": product_name,
                                 "colour_name": colour,
                                 "size_name": size,
