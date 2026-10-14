@@ -95,4 +95,227 @@ COLOUR_MAP = {
     "STORM": "Storm",
     "WALNT": "Walnut",
     "WH/RE": "White/Red",
-    "WHITE": "White
+    "WHITE": "White",
+    "WHI_B": "White/Black",
+    "WHI_M": "White Marle",
+    "WHI_N": "White/Navy",
+    "DAR_C": "Dark Charcoal",
+    "LBRTY": "Liberty",
+    "MUSH": "Mushroom",
+    "MUSTA": "Mustard",
+    "ORANG": "Orange"
+}
+
+SIZE_MAP = {
+    "F-XS": "XS",
+    "G-S": "Small",
+    "H-M": "Medium",
+    "I-L": "Large",
+    "J-XL": "XL",
+    "K-2XL": "2XL",
+    "L-3XL": "3XL",
+    "M-4XL": "4XL",
+    "N-5XL": "5XL",
+    "P-Os": "One Size",
+    "OS": "One Size",
+    "P0-3": "0-3 Months",
+    "Q3-6": "3-6 Months",
+    "R6-12": "6-12 Months",
+    "00-03": "0-3 Months",
+    "03-06": "3-6 Months",
+    "06-12": "6-12 Months",
+    "12-18": "12-18 Months",
+    "18-24": "18-24 Months",
+    "S1218": "12-18 Months",
+    "T1824": "18-24 Months",
+    "XSM": "XS",
+    "SML": "Small",
+    "MED": "Medium",
+    "LGE": "Large",
+    "XLG": "XL",
+    "2XL": "2XL",
+    "3XL": "3XL"
+}
+
+
+def parse_sku_attributes(variant_sku):
+    parts = variant_sku.split("-")
+    if len(parts) >= 3:
+        raw_colour = parts[1]
+        raw_size = "-".join(parts[2:])
+        
+        colour = COLOUR_MAP.get(raw_colour, raw_colour.replace("_", " ").title())
+        size = SIZE_MAP.get(raw_size, raw_size.replace("_", " ").title())
+        
+        return colour, size
+    return "N/A", "N/A"
+
+
+def check_token_expiration_and_alert():
+    if not API_TOKEN or not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        parts = API_TOKEN.split(".")
+        if len(parts) < 2:
+            return
+        payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_part).decode("utf-8"))
+        
+        eat = payload.get("eat")
+        if eat:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            days_left = (eat - now_ts) / 86400  # Convert seconds to days
+            
+            if days_left <= 0:
+                msg = "🚨 **MAYDAY! THE TOKEN HAS OFFICIALLY KICKED THE BUCKET!** 🪦 AS Colour has locked us out in the cold. Drop what you're doing, grab a fresh token, and slap it into GitHub Secrets before the tees revolt!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print("Alert sent: Token expired.")
+            elif days_left <= 5:
+                msg = f"⏳ **TICK-TOCK!** Your AS Colour token is aging like fine milk and expires in **{round(days_left, 1)} days**. Get ahead of the chaos and grab a fresh token before this ship hits the iceberg!"
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+                print(f"Alert sent: Token expires in {round(days_left, 1)} days.")
+    except Exception as e:
+        print(f"Error checking token expiration: {e}")
+
+
+def fetch_monitored_inventory():
+    headers = {
+        "Content-Type": "application/json"
+    }
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
+
+    scanned_items = {}
+    has_next_products = True
+    product_cursor = None
+
+    query = """
+    query FetchCatalog($productCursor: String) {
+      site {
+        products(first: 250, after: $productCursor) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          edges {
+            node {
+              id
+              name
+              sku
+              variants(first: 250) {
+                edges {
+                  node {
+                    id
+                    sku
+                    inventory {
+                      aggregated {
+                        availableToSell
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    while has_next_products:
+        variables = {
+            "productCursor": product_cursor
+        }
+
+        try:
+            response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
+            if response.status_code != 200:
+                print(f"API Error: {response.status_code} - {response.text}")
+                break
+
+            data = response.json()
+            if "errors" in data:
+                print(f"GraphQL Error: {data['errors']}")
+                break
+
+            products_data = data.get("data", {}).get("site", {}).get("products", {})
+            edges = products_data.get("edges", [])
+
+            for edge in edges:
+                product = edge.get("node", {})
+                style_sku = product.get("sku", "").strip()
+                product_name = product.get("name", "").strip()
+
+                if style_sku in TARGET_STYLES:
+                    variants = product.get("variants", {}).get("edges", [])
+                    for v_edge in variants:
+                        v_node = v_edge.get("node", {})
+                        variant_sku = v_node.get("sku", "").strip()
+                        
+                        colour, size = parse_sku_attributes(variant_sku)
+
+                        inv_data = v_node.get("inventory", {}).get("aggregated", {})
+                        stock = inv_data.get("availableToSell", 0) if inv_data else 0
+
+                        if variant_sku:
+                            scanned_items[variant_sku] = {
+                                "style_sku": style_sku,
+                                "product_name": product_name,
+                                "colour_name": colour,
+                                "size_name": size,
+                                "stock": stock
+                            }
+
+            page_info = products_data.get("pageInfo", {})
+            has_next_products = page_info.get("hasNextPage", False)
+            product_cursor = page_info.get("endCursor")
+
+        except Exception as e:
+            print(f"Request Exception: {e}")
+            break
+
+    return scanned_items
+
+
+def sync_inventory_and_alert():
+    check_token_expiration_and_alert()
+
+    print("Fetching catalog data with fully translated attributes from AS Colour Australia...")
+    current_inventory = fetch_monitored_inventory()
+    print(f"Scanned {len(current_inventory)} target variants from API.")
+
+    if not current_inventory:
+        print("No inventory data retrieved. Sending scan failure alert.")
+        if DISCORD_WEBHOOK_URL:
+            fail_msg = "🚨 **INVENTORY EMERGENCY!** The tracker went looking for tees and found *absolute emptiness* (0 items). Either AS Colour put up a firewall or ghosts stole the warehouse. Check your token/API immediately!"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": fail_msg})
+        return
+
+    response = supabase.table("inventory_states").select("*").execute()
+    
+    previous_states = {}
+    if response.data:
+        for item in response.data:
+            v_id = item.get("variant_id")
+            previous_states[v_id] = item
+            if "-CHA_P-" in v_id:
+                previous_states[v_id.replace("-CHA_P-", "-CHARC-")] = item
+            elif "-CHARC-" in v_id:
+                previous_states[v_id.replace("-CHARC-", "-CHA_P-")] = item
+
+    alerts = []
+    upsert_payload = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for sku, item_data in current_inventory.items():
+        stock = item_data["stock"]
+        prev_data = previous_states.get(sku)
+        is_low = stock < 25
+
+        if prev_data is not None:
+            was_low = prev_data.get("is_below_25", False)
+            
+            if is_low and (not was_low or prev_data.get("stock_count") != stock):
+                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
+            elif not is_low and was_low:
+                alerts.append(f"🎉 **Restock Alert**:
