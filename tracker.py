@@ -8,12 +8,10 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
-# Initialize Supabase credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# AS Colour Australia GraphQL API credentials
 GRAPHQL_URL = "https://www.ascolour.com.au/graphql"
 raw_token = os.environ.get("ASCOLOUR_GRAPHQL_TOKEN") or os.environ.get("AS_COLOUR_API_TOKEN")
 
@@ -22,10 +20,8 @@ if raw_token and raw_token.lower().startswith("bearer "):
 else:
     API_TOKEN = raw_token
 
-# Discord Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# Monitored Scope (73 Target Styles)
 TARGET_STYLES = [
     "1000", "1001", "1002", "1117", "3001", "3003", "3005", "3006", "3009", "3010",
     "3030", "3031", "3032", "3033", "3034", "3035", "3036", "3037", "4001", "4001g",
@@ -128,13 +124,7 @@ def fetch_monitored_inventory():
                     id
                     sku
                     inventory {
-                      byLocation {
-                        edges {
-                          node {
-                            availableToSell
-                          }
-                        }
-                      }
+                      quantityAvailable
                     }
                   }
                 }
@@ -146,7 +136,7 @@ def fetch_monitored_inventory():
     }
     """
 
-    global_debug_printed = False
+    debug_printed = False
 
     while has_next_products:
         variables = {"productCursor": product_cursor}
@@ -180,20 +170,13 @@ def fetch_monitored_inventory():
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
                         inv_data = v_node.get("inventory") or {}
 
-                        # Print the very first variant's inventory object to see what came back
-                        if not global_debug_printed:
-                            print(f"🔍 FIRST VARIANT INVENTORY DUMP ({raw_v_sku}): {json.dumps(inv_data, indent=2)}")
-                            global_debug_printed = True
+                        if not debug_printed:
+                            print(f"🔍 INVENTORY OBJECT DUMP ({raw_v_sku}): {json.dumps(inv_data, indent=2)}")
+                            debug_printed = True
 
-                        by_loc_data = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
-                        loc_edges = by_loc_data.get("edges", []) if isinstance(by_loc_data, dict) else []
-                        
                         stock = 0
-                        for loc_edge in loc_edges:
-                            loc_node = loc_edge.get("node", {}) if isinstance(loc_edge, dict) else {}
-                            qty = loc_node.get("availableToSell")
-                            if qty is not None:
-                                stock += qty
+                        if isinstance(inv_data, dict):
+                            stock = inv_data.get("quantityAvailable", 0) or 0
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
@@ -216,7 +199,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with universal inventory inspection...")
+    print("Fetching catalog data with direct quantityAvailable inventory...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
