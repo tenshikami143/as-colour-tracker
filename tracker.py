@@ -109,7 +109,6 @@ def fetch_monitored_inventory():
     has_next_products = True
     product_cursor = None
 
-    # Using standard LocationConnection pattern: edges -> node -> availableToSell
     query = """
     query FetchCatalog($productCursor: String) {
       site {
@@ -147,7 +146,7 @@ def fetch_monitored_inventory():
     }
     """
 
-    debug_printed = False
+    global_debug_printed = False
 
     while has_next_products:
         variables = {"productCursor": product_cursor}
@@ -181,9 +180,10 @@ def fetch_monitored_inventory():
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
                         inv_data = v_node.get("inventory") or {}
 
-                        if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
-                            print(f"🔍 BERRY INVENTORY BY-LOCATION NODE: {json.dumps(inv_data, indent=2)}")
-                            debug_printed = True
+                        # Print the very first variant's inventory object to see what came back
+                        if not global_debug_printed:
+                            print(f"🔍 FIRST VARIANT INVENTORY DUMP ({raw_v_sku}): {json.dumps(inv_data, indent=2)}")
+                            global_debug_printed = True
 
                         by_loc_data = inv_data.get("byLocation") if isinstance(inv_data, dict) else {}
                         loc_edges = by_loc_data.get("edges", []) if isinstance(by_loc_data, dict) else []
@@ -216,7 +216,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with properly structured LocationConnection...")
+    print("Fetching catalog data with universal inventory inspection...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
