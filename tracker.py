@@ -260,9 +260,23 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
+                        # Extract stock safely with fallback cascade
                         inv_data = v_node.get("inventory") or {}
                         agg_data = inv_data.get("aggregated") if isinstance(inv_data, dict) else None
-                        stock = agg_data.get("availableToSell", 0) if isinstance(agg_data, dict) else 0
+                        
+                        stock = 0
+                        if isinstance(agg_data, dict) and agg_data.get("availableToSell") is not None:
+                            stock = agg_data.get("availableToSell")
+                        elif isinstance(inv_data, dict) and inv_data.get("quantity") is not None:
+                            stock = inv_data.get("quantity")
+                        elif v_node.get("quantityAvailable") is not None:
+                            stock = v_node.get("quantityAvailable")
+                        elif v_node.get("inventoryQuantity") is not None:
+                            stock = v_node.get("inventoryQuantity")
+
+                        # Detailed debug log for sample style 4001 Berry item
+                        if "4001" in style_sku and "BERRY" in variant_sku:
+                            print(f"DEBUG STOCK RESOLUTION FOR {variant_sku}: raw_inv={inv_data}, resolved_stock={stock}")
 
                         if variant_sku:
                             scanned_items[variant_sku] = {
