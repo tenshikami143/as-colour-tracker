@@ -297,25 +297,3 @@ def sync_inventory_and_alert():
     if response.data:
         for item in response.data:
             v_id = item.get("variant_id")
-            previous_states[v_id] = item
-            if "-CHA_P-" in v_id:
-                previous_states[v_id.replace("-CHA_P-", "-CHARC-")] = item
-            elif "-CHARC-" in v_id:
-                previous_states[v_id.replace("-CHARC-", "-CHA_P-")] = item
-
-    alerts = []
-    upsert_payload = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    for sku, item_data in current_inventory.items():
-        stock = item_data["stock"]
-        prev_data = previous_states.get(sku)
-        is_low = stock < 25
-
-        if prev_data is not None:
-            was_low = prev_data.get("is_below_25", False)
-            
-            if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - {item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units")
-            elif not is_low and was_low:
-                alerts.append(f"🎉 **Restock Alert**:
