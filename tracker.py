@@ -185,6 +185,7 @@ SIZE_MAP = {
     "SML": "Small",
     "MED": "Medium",
     "LGE": "Large",
+    "LRG": "Large",
     "XLG": "XL",
     # Current short codes
     "XS": "XS",
