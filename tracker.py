@@ -128,13 +128,8 @@ def fetch_monitored_inventory():
                     id
                     sku
                     inventory {
-                      locations {
-                        edges {
-                          node {
-                            name
-                            quantityAvailable
-                          }
-                        }
+                      byLocation {
+                        availableToSell
                       }
                     }
                   }
@@ -180,20 +175,19 @@ def fetch_monitored_inventory():
                         
                         colour, size, variant_sku = parse_sku_attributes(raw_v_sku)
 
-                        # Extract stock across warehouse locations
+                        # Extract stock across byLocation entries
                         inv_data = v_node.get("inventory") or {}
-                        locations_edges = inv_data.get("locations", {}).get("edges", []) if isinstance(inv_data, dict) else []
+                        by_location = inv_data.get("byLocation") if isinstance(inv_data, dict) else []
                         
                         stock = 0
-                        for loc_edge in locations_edges:
-                            loc_node = loc_edge.get("node", {})
-                            qty = loc_node.get("quantityAvailable", 0)
-                            if qty:
-                                stock += qty
+                        if isinstance(by_location, list):
+                            for loc in by_location:
+                                if isinstance(loc, dict) and loc.get("availableToSell") is not None:
+                                    stock += loc.get("availableToSell")
 
                         # Debug dump for style 4001 Berry item
                         if "4001" in style_sku and "BERRY" in variant_sku and not debug_printed:
-                            print(f"🔍 LOCATIONS DEBUG FOR {variant_sku}: inv={inv_data}, calculated_stock={stock}")
+                            print(f"🔍 BY-LOCATION DEBUG FOR {variant_sku}: inv={inv_data}, calculated_stock={stock}")
                             debug_printed = True
 
                         if variant_sku:
@@ -217,7 +211,7 @@ def fetch_monitored_inventory():
 
 def sync_inventory_and_alert():
     check_token_expiration_and_alert()
-    print("Fetching catalog data with location inventory from AS Colour Australia...")
+    print("Fetching catalog data with byLocation inventory from AS Colour Australia...")
     current_inventory = fetch_monitored_inventory()
     print(f"Scanned {len(current_inventory)} target variants from API.")
 
