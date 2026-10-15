@@ -5,7 +5,8 @@ import traceback
 import random
 import json
 import requests
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timedelta, timezone, time as dtime
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from supabase import create_client, Client
 
@@ -132,6 +133,8 @@ FORCE_RUN = os.environ.get("FORCE_RUN") == "1"
 # Settings below are overridden at runtime by the Supabase `app_settings` table (edited from the admin app)
 LOW_STOCK_THRESHOLD = 25
 SEND_ALL_CLEAR = True
+RUN_TZ = timezone.utc          # time zone used for the date in the Discord report
+MAX_REPORT_MESSAGES = 15       # safety cap on Discord messages per run
 MAX_ATTEMPTS_PER_DAY = 3  # a failing run is retried at the next hourly check, up to this many times a day
 
 # If more than this share of variants come back without a stock number, treat the scan as broken
@@ -151,6 +154,7 @@ DEFAULT_STYLES = [
 # The styles actually monitored this run (set from the Supabase `watchlist` table in setup_watchlist())
 TARGET_STYLES = list(DEFAULT_STYLES)
 TARGET_LOWER = {style.lower(): style for style in TARGET_STYLES}
+SLUG_TO_STYLE = {}   # product-page slug -> watchlist key, for links that have no style code in them
 
 # Translation dictionaries for cleaner readability
 COLOUR_MAP = {
@@ -314,6 +318,44 @@ def attributes_from_variant(variant, variant_sku):
     return colour, size
 
 
+def slug_from_url(url):
+    """'https://www.ascolour.com.au/wos-maple-tee-4001/' -> 'wos-maple-tee-4001'"""
+    path = urlparse(str(url or "")).path.strip("/")
+    return path.split("/")[-1].lower() if path else None
+
+
+def product_slug(product):
+    path = ((product.get("custom_url") or {}).get("url") or "").strip().strip("/")
+    return path.split("/")[-1].lower() if path else None
+
+
+def extract_eta(variant):
+    """AS Colour puts restock dates like 'ETA 20 Jan' in the variant's mpn field."""
+    text = str(variant.get("mpn") or "").strip()
+    return text[:100] if text and "eta" in text.lower() else None
+
+
+def stock_status_label(stock):
+    if stock is None:
+        return "No stock data"
+    if stock == 0:
+        return "Out of stock"
+    if stock < LOW_STOCK_THRESHOLD:
+        return "Low"
+    return "In stock"
+
+
+def fetch_all_rows(table, order, page=1000):
+    """Read every row. Supabase returns at most 1000 rows per request, so a plain select() silently misses the rest."""
+    rows, start = [], 0
+    while True:
+        data = supabase.table(table).select("*").order(order).range(start, start + page - 1).execute().data or []
+        rows.extend(data)
+        if len(data) < page:
+            return rows
+        start += page
+
+
 def to_int(value):
     if value is None:
         return None
@@ -368,11 +410,27 @@ def fetch_stock_batch(product_ids, label="", retry_empty=True):
 
 
 def collect_product(product, scanned_items, stats):
-    style_sku = TARGET_LOWER.get((product.get("sku") or "").strip().lower())
+    sku_key = (product.get("sku") or "").strip().lower()
+    style_sku = TARGET_LOWER.get(sku_key)
     product_name = (product.get("name") or "").strip()
 
     if not style_sku:
-        return
+        # A link without a style code in it (e.g. .../mens-organic-rib-singlet/): match it by its page address instead
+        slug = product_slug(product)
+        placeholder = SLUG_TO_STYLE.get(slug) if slug else None
+        if not placeholder or not sku_key:
+            return
+        style_sku = sku_key
+        stats["slug_resolved"][placeholder] = (sku_key, product.get("id"))
+
+    # If the same product is also on the watchlist as a link without a style code, that extra row is a duplicate
+    slug = product_slug(product)
+    other = SLUG_TO_STYLE.get(slug) if slug else None
+    if other and other != style_sku and other.lower() != sku_key and sku_key:
+        stats["slug_resolved"][other] = (sku_key, product.get("id"))
+
+    custom_path = ((product.get("custom_url") or {}).get("url") or "").strip()
+    product_url = f"https://www.ascolour.com.au{custom_path}" if custom_path.startswith("/") else None
 
     stats["styles_found"].add(style_sku)
     if product.get("id"):
@@ -398,8 +456,7 @@ def collect_product(product, scanned_items, stats):
             stats["debug_printed"] += 1
 
         if stock is None:
-            stats["no_data"] += 1
-            continue  # never store "unknown" as 0
+            stats["no_data"] += 1  # kept below: a variant with no stock number counts as low stock
 
         colour, size = attributes_from_variant(variant, variant_sku)
         scanned_items[variant_sku] = {
@@ -407,7 +464,9 @@ def collect_product(product, scanned_items, stats):
             "product_name": product_name,
             "colour_name": colour,
             "size_name": size,
-            "stock": stock
+            "stock": stock,  # None = the API gave no stock number
+            "eta": extract_eta(variant),
+            "product_url": product_url,
         }
 
 
@@ -466,7 +525,7 @@ def fetch_monitored_inventory():
     scanned_items = {}
     stats = {
         "seen": 0, "no_data": 0, "debug_printed": 0,
-        "styles_found": set(), "style_ids": {}, "api_empty": False,
+        "styles_found": set(), "style_ids": {}, "api_empty": False, "slug_resolved": {},
     }
 
     known_ids = {
@@ -480,7 +539,7 @@ def fetch_monitored_inventory():
     else:
         scan_for_products(scanned_items, stats)
 
-    stats["missing_styles"] = [s for s in TARGET_STYLES if s not in stats["styles_found"]]
+    stats["missing_styles"] = [s for s in TARGET_STYLES if s not in stats["styles_found"] and s not in stats["slug_resolved"]]
     return scanned_items, stats
 
 
@@ -570,7 +629,8 @@ def should_run_now(settings, now_utc=None):
 
 
 def apply_settings(settings):
-    global LOW_STOCK_THRESHOLD, SEND_ALL_CLEAR
+    global LOW_STOCK_THRESHOLD, SEND_ALL_CLEAR, RUN_TZ
+    RUN_TZ = get_timezone(settings)
     threshold = to_int(settings.get("low_stock_threshold"))
     LOW_STOCK_THRESHOLD = threshold if threshold is not None and threshold >= 0 else 25
     SEND_ALL_CLEAR = str(settings.get("send_all_clear", "true")).strip().lower() != "false"
@@ -604,11 +664,12 @@ def record_result(settings, summary, now_utc=None):
 # Watchlist (Supabase table `watchlist`)
 # ---------------------------------------------------------------------------
 
-def apply_watchlist(styles, ids):
-    global TARGET_STYLES, TARGET_LOWER, STYLE_PRODUCT_IDS
+def apply_watchlist(styles, ids, slugs=None):
+    global TARGET_STYLES, TARGET_LOWER, STYLE_PRODUCT_IDS, SLUG_TO_STYLE
     TARGET_STYLES = list(styles)
     TARGET_LOWER = {s.lower(): s for s in TARGET_STYLES}
     STYLE_PRODUCT_IDS = dict(ids)
+    SLUG_TO_STYLE = dict(slugs or {})
 
 
 def load_watchlist():
@@ -640,7 +701,7 @@ def setup_watchlist():
         apply_watchlist(DEFAULT_STYLES, DEFAULT_PRODUCT_IDS)
         return None
 
-    styles, ids, seen = [], {}, set()
+    styles, ids, slugs, seen = [], {}, {}, set()
     for row in rows:
         sku = row["style_sku"].strip()
         if sku.lower() in seen:
@@ -650,15 +711,34 @@ def setup_watchlist():
         product_id = to_int(row.get("product_id"))
         if product_id:
             ids[sku] = product_id
+        slug = slug_from_url(row.get("url"))
+        if slug:
+            slugs[slug] = sku
 
-    apply_watchlist(styles, ids)
+    apply_watchlist(styles, ids, slugs)
     return rows
 
 
-def save_found_product_ids(rows, found_ids):
+def save_found_product_ids(rows, found_ids, resolved=None):
     """Fill in the product_id column for rows that didn't have one, so later runs skip the slow scan."""
+    resolved = resolved or {}
+    existing = {r["style_sku"].strip().lower() for r in rows or []}
     for row in rows or []:
         canonical = TARGET_LOWER.get(row["style_sku"].strip().lower())
+
+        if canonical in resolved:
+            # The link had no style code: swap the placeholder for the real style code
+            real_sku, real_id = resolved[canonical]
+            try:
+                if real_sku.lower() in existing:
+                    supabase.table("watchlist").delete().eq("style_sku", row["style_sku"]).execute()
+                else:
+                    supabase.table("watchlist").update({"style_sku": real_sku, "product_id": real_id}).eq("style_sku", row["style_sku"]).execute()
+                print(f"Link {row['style_sku']} is style {real_sku} (product ID {real_id}).")
+            except Exception as e:
+                print(f"Could not save the style code for {row['style_sku']}: {e}")
+            continue
+
         product_id = found_ids.get(canonical)
         if product_id and to_int(row.get("product_id")) != product_id:
             try:
@@ -711,6 +791,94 @@ FUN_MESSAGES = [
 ]
 
 
+def previous_status_label(prev_data):
+    saved = prev_data.get("stock_status")
+    if saved:
+        return saved
+    stock = to_int(prev_data.get("stock_count"))
+    if not stock:
+        return "Out of stock"
+    return "Low" if stock < LOW_STOCK_THRESHOLD else "In stock"
+
+
+def low_line(ev):
+    status = ev["new_status"]
+    if status == "No stock data":
+        stock = "**no stock data**"
+    elif status == "Out of stock":
+        stock = "**0** (out of stock)"
+    else:
+        stock = f"**{ev['new_stock']}** left"
+    line = f"• {ev['colour_name']} / {ev['size_name']} — {stock}"
+    if ev.get("previous_stock") is not None:
+        line += f" · was {ev['previous_stock']}"
+    if ev.get("eta"):
+        line += f" · {ev['eta']}"
+    return line
+
+
+def restock_line(ev):
+    line = f"• {ev['colour_name']} / {ev['size_name']} — now **{ev['new_stock']}**"
+    if ev.get("previous_stock") is not None:
+        line += f" · was {ev['previous_stock']}"
+        previous = (ev.get("previous_status") or "").lower()
+        if previous and previous != "in stock":
+            line += f" ({previous})"
+    return line
+
+
+def product_blocks(events, line_fn, max_lines=10):
+    """Group events by product so each product is one block: a bold name + link, then one line per colour/size."""
+    groups = {}
+    for ev in events:
+        key = (ev.get("product_name") or ev["style_sku"], ev.get("product_url"))
+        groups.setdefault(key, []).append(ev)
+    blocks = []
+    for (name, url), evs in sorted(groups.items(), key=lambda kv: (kv[0][0] or "").lower()):
+        evs.sort(key=lambda e: (e.get("colour_name") or "", e.get("size_name") or ""))
+        for i in range(0, len(evs), max_lines):
+            head = f"**{name}**" + (f" <{url}>" if url else "") + (" (continued)" if i else "")
+            blocks.append(head + "\n" + "\n".join(line_fn(e) for e in evs[i:i + max_lines]))
+    return blocks
+
+
+def chunk_report(sections, limit=1800):
+    """Pack the blocks into Discord messages that stay under the 2000-character limit."""
+    messages, current, current_title = [], "", None
+    for title, blocks in sections:
+        for index, block in enumerate(blocks):
+            piece = ("" if current_title == title else title + "\n") + block
+            if current and len(current) + 1 + len(piece) > limit:
+                messages.append(current)
+                piece = title + (" (continued)" if index else "") + "\n" + block
+                current = ""
+            current = (current + "\n" if current else "") + piece
+            current_title = title
+    if current:
+        messages.append(current)
+    return messages
+
+
+def build_report(low_events, restock_events):
+    threshold = LOW_STOCK_THRESHOLD
+    sections = []
+    if low_events:
+        sections.append((f"🔻 **FELL BELOW {threshold}** — take these off the website ({len(low_events)})",
+                         product_blocks(low_events, low_line)))
+    if restock_events:
+        sections.append((f"🔺 **RESTOCKED TO {threshold}+** — put these back on the website ({len(restock_events)})",
+                         product_blocks(restock_events, restock_line)))
+    messages = chunk_report(sections)
+    stamp = datetime.now(RUN_TZ).strftime("%a %d %b")
+    intro = (f"📅 **Stock report — {stamp}:** {len(low_events)} fell below {threshold}, "
+             f"{len(restock_events)} restocked to {threshold}+ (changes since the last run).")
+    messages[0] = intro + "\n\n" + messages[0]
+    if len(messages) > MAX_REPORT_MESSAGES:
+        hidden = len(messages) - MAX_REPORT_MESSAGES
+        messages = messages[:MAX_REPORT_MESSAGES] + [f"…and {hidden} more message(s) of changes. Open the admin app to see the full list."]
+    return messages
+
+
 def sync_inventory_and_alert():
     watchlist_rows = setup_watchlist()
     source = "the Supabase watchlist table" if watchlist_rows else "the built-in list"
@@ -754,27 +922,44 @@ def sync_inventory_and_alert():
         )
 
     if watchlist_rows:
-        save_found_product_ids(watchlist_rows, stats["style_ids"])
+        save_found_product_ids(watchlist_rows, stats["style_ids"], stats["slug_resolved"])
 
-    response = supabase.table("inventory_states").select("*").execute()
-    previous_states = {item["variant_id"]: item for item in response.data} if response.data else {}
+    previous_states = {item["variant_id"]: item for item in fetch_all_rows("inventory_states", "variant_id")}
 
-    alerts = []
+    low_events = []       # fell below the threshold since the last run
+    restock_events = []   # back at/above the threshold since the last run
     upsert_payload = []
     now_iso = datetime.now(timezone.utc).isoformat()
 
     for sku, item_data in current_inventory.items():
-        stock = item_data["stock"]
+        stock = item_data["stock"]          # None = no stock number from the API
+        eta = item_data.get("eta")
+        stock_value = stock if stock is not None else 0
+        # Low = anything that is not a number at or above the threshold (0, 1-24, blank / no data)
+        is_low = stock is None or stock < LOW_STOCK_THRESHOLD
+        status = stock_status_label(stock)
         prev_data = previous_states.get(sku)
-        is_low = stock < LOW_STOCK_THRESHOLD
 
         if prev_data is not None and not SEED_ONLY:
-            was_low = prev_data.get("is_below_25", False)
-            if is_low and (not was_low or prev_data.get("stock_count") != stock):
-                alerts.append(
-                    f"⚠️ **Low Stock Alert**: `{sku}` ({item_data['product_name']} - "
-                    f"{item_data['colour_name']} / {item_data['size_name']}) -> Stock: **{stock}** units"
-                )
+            prev_stock = to_int(prev_data.get("stock_count"))
+            # Judge the old numbers against today's threshold, so changing the threshold doesn't create fake events
+            was_low = prev_data.get("stock_status") == "No stock data" or prev_stock is None or prev_stock < LOW_STOCK_THRESHOLD
+            if is_low != was_low:
+                event = {
+                    "event_type": "low" if is_low else "restock",
+                    "variant_id": sku,
+                    "style_sku": item_data["style_sku"],
+                    "product_name": item_data["product_name"],
+                    "colour_name": item_data["colour_name"],
+                    "size_name": item_data["size_name"],
+                    "previous_stock": prev_stock,
+                    "previous_status": previous_status_label(prev_data),
+                    "new_stock": stock_value,
+                    "new_status": status,
+                    "eta": eta,
+                    "product_url": item_data.get("product_url"),
+                }
+                (low_events if is_low else restock_events).append(event)
 
         upsert_payload.append({
             "variant_id": sku,
@@ -782,31 +967,64 @@ def sync_inventory_and_alert():
             "product_name": item_data["product_name"],
             "colour_name": item_data["colour_name"],
             "size_name": item_data["size_name"],
-            "stock_count": stock,
+            "stock_count": stock_value,
             "is_below_25": is_low,
+            "stock_status": status,
+            "eta": eta,
             "updated_at": now_iso
         })
 
     # Upsert in batches so big catalogs don't hit request-size limits
-    for i in range(0, len(upsert_payload), 500):
-        supabase.table("inventory_states").upsert(upsert_payload[i:i + 500]).execute()
+    try:
+        for i in range(0, len(upsert_payload), 500):
+            supabase.table("inventory_states").upsert(upsert_payload[i:i + 500]).execute()
+    except Exception as e:
+        # Most likely the stock_status / eta columns don't exist yet: save without them and tell the user
+        print(f"Saving with the status columns failed ({e}); retrying without them.")
+        post_discord("⚠️ **Setup warning:** the `stock_status` / `eta` columns are missing in Supabase, so statuses and ETAs "
+                     "weren't saved. Run `update_setup.sql` in the Supabase SQL editor.")
+        legacy = [{k: v for k, v in row.items() if k not in ("stock_status", "eta")} for row in upsert_payload]
+        for i in range(0, len(legacy), 500):
+            supabase.table("inventory_states").upsert(legacy[i:i + 500]).execute()
     print(f"Upserted {len(upsert_payload)} variant rows.")
 
+    all_events = low_events + restock_events
+    if all_events:
+        try:
+            rows = [{k: v for k, v in ev.items() if k != "product_url"} for ev in all_events]
+            for i in range(0, len(rows), 500):
+                supabase.table("stock_events").insert(rows[i:i + 500]).execute()
+            print(f"Recorded {len(rows)} stock event(s).")
+        except Exception as e:
+            print(f"Could not save stock events: {e}")
+            post_discord("⚠️ **Setup warning:** couldn't save the change history. Run `update_setup.sql` in the Supabase SQL editor.")
+
+    try:  # keep the history to the last 90 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        supabase.table("stock_events").delete().lt("created_at", cutoff).execute()
+    except Exception:
+        pass
+
     low_count = sum(1 for p in upsert_payload if p["is_below_25"])
-    summary = f"{len(upsert_payload)} variants across {len(stats['styles_found'])} styles, {low_count} below {LOW_STOCK_THRESHOLD}"
+    summary = (f"{len(upsert_payload)} variants across {len(stats['styles_found'])} styles, {low_count} below {LOW_STOCK_THRESHOLD}; "
+               f"{len(low_events)} fell below, {len(restock_events)} restocked")
 
     if SEED_ONLY:
         print("SEED_ONLY is on: database updated, alerts skipped.")
         return summary
 
     if DISCORD_WEBHOOK_URL:
-        if alerts:
-            for i in range(0, len(alerts), 10):
-                post_discord("\n".join(alerts[i:i + 10]))
-            print(f"Sent {len(alerts)} alert(s) to Discord.")
+        if all_events:
+            for message in build_report(low_events, restock_events):
+                post_discord(message)
+                time.sleep(0.6)  # stay well inside Discord's rate limit
+            print(f"Sent the stock report: {len(low_events)} fell below, {len(restock_events)} restocked.")
         elif SEND_ALL_CLEAR:
-            post_discord(random.choice(FUN_MESSAGES))
-            print("Discord alert delivered successfully.")
+            post_discord(
+                random.choice(FUN_MESSAGES)
+                + f"\n✅ **No changes since the last run:** nothing fell below {LOW_STOCK_THRESHOLD} and nothing was restocked."
+            )
+            print("No changes - all-clear message sent.")
 
     return summary
 
