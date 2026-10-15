@@ -12,6 +12,7 @@ Optional (enable the extra buttons):
 import hmac
 import re
 from datetime import datetime, timezone, time as dtime, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -35,7 +36,8 @@ TIMEZONES = [
     "Europe/London", "America/New_York", "America/Los_Angeles", "UTC",
 ]
 
-STYLE_RE = re.compile(r"^[A-Za-z0-9]{3,10}$")
+CODE_RE = re.compile(r"^\d{3,5}[a-z]{0,2}$", re.I)         # a style code such as 5026 or 4001g
+SLUG_CODE_RE = re.compile(r"-(\d{3,5}[a-z]{0,2})$", re.I)  # the style code at the end of a product link
 
 
 # ---------------------------------------------------------------------------
@@ -68,20 +70,48 @@ def get_tz(name):
         return timezone.utc
 
 
-def parse_style_codes(text):
-    """'5063g, 4005  bad!' -> (['5063g', '4005'], ['bad!']). Codes are stored lower-case."""
-    valid, invalid, seen = [], [], set()
-    for code in re.split(r"[\s,;]+", (text or "").strip()):
-        if not code:
+def parse_entry(text):
+    """One pasted item (an AS Colour product link, or a plain style code) -> a dict describing it."""
+    raw = (text or "").strip().strip(",;")
+    if not raw:
+        return None
+    if CODE_RE.match(raw):
+        return {"input": raw, "ok": True, "style": raw.lower(), "slug": None, "url": None, "has_code": True}
+    candidate = raw if "//" in raw else "https://" + raw
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return {"input": raw, "ok": False, "why": "not a valid link"}
+    host = (parsed.netloc or "").lower().split(":")[0]
+    if not (host == "ascolour.com.au" or host.endswith(".ascolour.com.au")):
+        return {"input": raw, "ok": False, "why": "not an AS Colour Australia link (it should be on ascolour.com.au)"}
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts:
+        return {"input": raw, "ok": False, "why": "that link doesn't point to a product"}
+    slug = parts[-1].lower()
+    match = SLUG_CODE_RE.search(slug)
+    return {"input": raw, "ok": True, "style": match.group(1).lower() if match else slug, "slug": slug,
+            "url": f"https://www.ascolour.com.au/{slug}/", "has_code": bool(match)}
+
+
+def parse_entries(text):
+    """Split a pasted block (one link per line, or separated by spaces/commas) into entries, without repeats."""
+    entries, seen = [], set()
+    for piece in re.split(r"[\s,;]+", (text or "").strip()):
+        entry = parse_entry(piece)
+        if not entry:
             continue
-        if STYLE_RE.match(code):
-            code = code.lower()
-            if code not in seen:
-                seen.add(code)
-                valid.append(code)
-        else:
-            invalid.append(code)
-    return valid, invalid
+        key = entry.get("style") or entry["input"]
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(entry)
+    return entries
+
+
+def slug_of(url):
+    path = urlparse(str(url or "")).path.strip("/")
+    return path.split("/")[-1].lower() if path else None
 
 
 def fmt_local(iso_value, tz):
@@ -173,21 +203,58 @@ def save_settings(values):
 
 
 INV_COLUMNS = ["variant_id", "style_sku", "product_name", "colour_name", "size_name", "stock_count", "updated_at"]
+INV_COLUMNS_NEW = INV_COLUMNS + ["stock_status", "eta"]
+
+
+def derive_status(stock, status):
+    """Use the saved status when there is one, otherwise work it out from the stock number."""
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    return "Out of stock" if int(stock or 0) == 0 else "In stock"
 
 
 @st.cache_data(ttl=120, show_spinner="Loading stock…")
 def load_inventory():
-    rows = fetch_all("inventory_states", ",".join(INV_COLUMNS), "variant_id")
-    df = pd.DataFrame(rows, columns=INV_COLUMNS)
+    try:
+        rows = fetch_all("inventory_states", ",".join(INV_COLUMNS_NEW), "variant_id")
+    except Exception:  # the status columns haven't been added yet (status_and_restock_setup.sql)
+        rows = fetch_all("inventory_states", ",".join(INV_COLUMNS), "variant_id")
+    df = pd.DataFrame(rows, columns=INV_COLUMNS_NEW)
     df["stock_count"] = pd.to_numeric(df["stock_count"], errors="coerce").fillna(0).astype(int)
+    df["status"] = [derive_status(n, st_) for n, st_ in zip(df["stock_count"], df["stock_status"])]
+    df["eta"] = df["eta"].fillna("")
     return df
 
 
+EVENT_COLUMNS = ("event_type,variant_id,style_sku,product_name,colour_name,size_name,"
+                 "previous_stock,previous_status,new_stock,new_status,eta,created_at")
+
+
+def load_events(since_iso):
+    """Low-stock and restock events since the given time, newest first. None if the table doesn't exist yet."""
+    rows, start = [], 0
+    try:
+        while True:
+            data = (get_db().table("stock_events").select(EVENT_COLUMNS).gte("created_at", since_iso)
+                    .order("created_at", desc=True).range(start, start + 999).execute().data or [])
+            rows.extend(data)
+            if len(data) < 1000:
+                break
+            start += 1000
+    except Exception:
+        return None
+    return pd.DataFrame(rows, columns=EVENT_COLUMNS.split(","))
+
+
 def load_watchlist():
-    rows = fetch_all("watchlist", "style_sku,product_id,enabled", "style_sku")
-    df = pd.DataFrame(rows, columns=["style_sku", "product_id", "enabled"])
+    try:
+        rows = fetch_all("watchlist", "style_sku,product_id,enabled,url", "style_sku")
+    except Exception:  # the url column hasn't been added yet (update_setup.sql)
+        rows = fetch_all("watchlist", "style_sku,product_id,enabled", "style_sku")
+    df = pd.DataFrame(rows, columns=["style_sku", "product_id", "enabled", "url"])
     df["product_id"] = pd.to_numeric(df["product_id"], errors="coerce").astype("Int64")
     df["enabled"] = df["enabled"].fillna(True).astype(bool)
+    df["url"] = df["url"].astype(object).where(df["url"].notna(), None)
     return df
 
 
@@ -242,17 +309,52 @@ def send_test_discord():
 # Tabs
 # ---------------------------------------------------------------------------
 
-def render_dashboard(settings, inv):
+CHANGE_WINDOWS = {"Last 24 hours": 1, "Last 3 days": 3, "Last 7 days": 7, "Last 30 days": 30}
+LINK_COLUMN = {"Link": st.column_config.LinkColumn("Link", display_text="Open ↗")}
+
+
+def style_links(wl):
+    return {str(sku).lower(): url for sku, url in zip(wl["style_sku"], wl["url"]) if url}
+
+
+def events_table(df, tz, links, kind):
+    def was(stock, status):
+        if pd.isna(stock):
+            return "—"
+        text = str(int(stock))
+        return f"{text} ({str(status).lower()})" if kind == "restock" and isinstance(status, str) and status and status != "In stock" else text
+
+    table = pd.DataFrame({
+        "When": [fmt_local(v, tz) for v in df["created_at"]],
+        "Product": df["product_name"],
+        "Colour": df["colour_name"],
+        "Size": df["size_name"],
+        "Now": df["new_stock"],
+        "Was": [was(n, s_) for n, s_ in zip(df["previous_stock"], df["previous_status"])],
+    })
+    if kind == "low":
+        table["Status"] = df["new_status"]
+        table["ETA"] = df["eta"].fillna("")
+    table["Link"] = [links.get(str(s_).lower()) for s_ in df["style_sku"]]
+    return table
+
+
+def render_dashboard(settings, inv, wl):
     tz = get_tz(settings.get("timezone"))
     threshold = to_int(settings.get("low_stock_threshold"), 25)
     status = {"ok": "✅ OK", "failed": "❌ Failed"}.get(settings.get("last_run_status"), "—")
-    low = inv[inv["stock_count"] < threshold].sort_values(["stock_count", "style_sku", "variant_id"])
+
+    window = st.selectbox("Show changes from the", list(CHANGE_WINDOWS), index=0)
+    since = datetime.now(timezone.utc) - timedelta(days=CHANGE_WINDOWS[window])
+    events = load_events(since.isoformat())
+    lows = events[events["event_type"] == "low"] if events is not None else None
+    restocks = events[events["event_type"] == "restock"] if events is not None else None
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Last run", fmt_local(settings.get("last_run_at"), tz))
     c2.metric("Last result", status)
-    c3.metric("Variants tracked", f"{len(inv):,}")
-    c4.metric(f"Below {threshold} units", f"{len(low):,}")
+    c3.metric(f"Fell below {threshold}", "—" if lows is None else f"{len(lows):,}")
+    c4.metric(f"Restocked to {threshold}+", "—" if restocks is None else f"{len(restocks):,}")
 
     if settings.get("last_run_summary"):
         st.caption(f"Last run: {settings['last_run_summary']}")
@@ -269,44 +371,103 @@ def render_dashboard(settings, inv):
         st.cache_data.clear()
         st.rerun()
 
-    st.subheader(f"Low stock ({len(low):,})")
-    st.caption("Based on the last tracker run.")
-    if low.empty:
-        st.success("Nothing is below the threshold right now. 🎉")
-        return
-    table = low[["style_sku", "product_name", "colour_name", "size_name", "stock_count"]].rename(columns={
-        "style_sku": "Style", "product_name": "Product", "colour_name": "Colour", "size_name": "Size", "stock_count": "Stock",
-    })
-    st.dataframe(table, hide_index=True)
-    st.download_button("⬇️ Download as CSV", table.to_csv(index=False).encode("utf-8"), "low_stock.csv", "text/csv")
+    if events is None:
+        st.warning("The change history isn't set up yet. Run `update_setup.sql` in the Supabase SQL editor, then run the tracker once. "
+                   "From then on this page lists what fell below or was restocked.")
+    else:
+        links = style_links(load_watchlist())
+        st.subheader(f"🔻 Fell below {threshold} - take off the website ({len(lows):,})")
+        if lows.empty:
+            st.success(f"Nothing fell below {threshold} in the {window.lower()}.")
+        else:
+            table = events_table(lows, tz, links, "low")
+            st.dataframe(table, hide_index=True, column_config=LINK_COLUMN)
+            st.download_button("⬇️ Download as CSV", table.drop(columns=["Link"]).to_csv(index=False).encode("utf-8"), "fell_below.csv", "text/csv", key="dl_low")
+
+        st.subheader(f"🔺 Restocked to {threshold}+ - put back on the website ({len(restocks):,})")
+        if restocks.empty:
+            st.success(f"Nothing was restocked in the {window.lower()}.")
+        else:
+            table = events_table(restocks, tz, links, "restock")
+            st.dataframe(table, hide_index=True, column_config=LINK_COLUMN)
+            st.download_button("⬇️ Download as CSV", table.drop(columns=["Link"]).to_csv(index=False).encode("utf-8"), "restocked.csv", "text/csv", key="dl_restock")
+
+    low_now = inv[inv["stock_count"] < threshold].sort_values(["stock_count", "style_sku", "variant_id"])
+    with st.expander(f"Everything that is below {threshold} right now ({len(low_now):,}) - for reference"):
+        st.caption("This is the full current list, including items that have been low for a long time. Alerts only cover changes.")
+        if low_now.empty:
+            st.write("Nothing is below the threshold.")
+        else:
+            st.dataframe(low_now[["style_sku", "product_name", "colour_name", "size_name", "stock_count", "status", "eta"]].rename(columns={
+                "style_sku": "Style", "product_name": "Product", "colour_name": "Colour", "size_name": "Size",
+                "stock_count": "Stock", "status": "Status", "eta": "ETA"}), hide_index=True)
 
 
 def render_watchlist(inv):
     st.subheader("Watchlist")
-    st.caption("These are the styles the tracker monitors. New styles get their product ID automatically on the next run "
-               "(the first run after adding one takes a few minutes).")
+    st.caption("The styles the tracker monitors. Paste AS Colour product links to add or remove them. "
+               "A newly added style is picked up on the next run (that first run takes a few minutes).")
 
     wl = load_watchlist()
 
     with st.form("add_styles", clear_on_submit=True):
-        text = st.text_input("Add style code(s)", placeholder="e.g. 5063g  or  5063g, 4005")
-        add_clicked = st.form_submit_button("➕ Add to watchlist")
+        text = st.text_area("➕ Add products: paste one AS Colour link per line",
+                            placeholder="https://www.ascolour.com.au/classic-tee-5026/\nhttps://www.ascolour.com.au/staple-tee-5001/", height=110)
+        add_clicked = st.form_submit_button("Add to watchlist")
 
     if add_clicked:
-        valid, invalid = parse_style_codes(text)
-        existing = {s.lower() for s in wl["style_sku"]}
-        new = [c for c in valid if c not in existing]
-        dupes = [c for c in valid if c in existing]
-        if invalid:
-            st.error("These don't look like style codes: " + ", ".join(invalid))
+        entries = parse_entries(text)
+        existing = {s_.lower() for s_ in wl["style_sku"]}
+        existing_slugs = {slug_of(u) for u in wl["url"] if u}
+        new_rows, dupes, bad = [], [], [e for e in entries if not e["ok"]]
+        for e in [e for e in entries if e["ok"]]:
+            if e["style"] in existing or (e["slug"] and e["slug"] in existing_slugs):
+                dupes.append(e["input"])
+            else:
+                row = {"style_sku": e["style"], "enabled": True}
+                if e["url"]:
+                    row["url"] = e["url"]
+                new_rows.append(row)
+        for e in bad:
+            st.error(f"Couldn't use `{e['input']}`: {e['why']}.")
         if dupes:
             st.info("Already on the watchlist: " + ", ".join(dupes))
-        if new:
-            get_db().table("watchlist").upsert([{"style_sku": c, "enabled": True} for c in new]).execute()
-            st.success("Added: " + ", ".join(new) + ". They'll be picked up on the next run.")
+        if new_rows:
+            try:
+                get_db().table("watchlist").upsert(new_rows).execute()
+            except Exception:  # no url column yet: save the style codes only
+                get_db().table("watchlist").upsert([{k: v for k, v in r.items() if k != "url"} for r in new_rows]).execute()
+                st.warning("Saved, but links can't be stored yet. Run `update_setup.sql` in the Supabase SQL editor.")
+            names = ", ".join(r["style_sku"] for r in new_rows)
+            st.success(f"Added {len(new_rows)}: {names}. They'll be picked up on the next run.")
             wl = load_watchlist()
-        elif not invalid and not dupes:
-            st.warning("Type at least one style code first.")
+        elif not bad and not dupes:
+            st.warning("Paste at least one link first.")
+
+    with st.form("remove_styles", clear_on_submit=True):
+        rtext = st.text_area("➖ Remove products: paste the link (or style code)", height=80,
+                             placeholder="https://www.ascolour.com.au/classic-tee-5026/")
+        rconfirm = st.checkbox("Yes, remove them from the watchlist")
+        remove_clicked = st.form_submit_button("Remove from watchlist")
+
+    if remove_clicked:
+        entries = parse_entries(rtext)
+        for e in [e for e in entries if not e["ok"]]:
+            st.error(f"Couldn't use `{e['input']}`: {e['why']}.")
+        wanted_styles = {e["style"] for e in entries if e["ok"]}
+        wanted_slugs = {e["slug"] for e in entries if e["ok"] and e["slug"]}
+        matches = [sku for sku, url in zip(wl["style_sku"], wl["url"])
+                   if str(sku).lower() in wanted_styles or (url and slug_of(url) in wanted_slugs)]
+        if not entries:
+            st.warning("Paste at least one link first.")
+        elif not matches:
+            st.info("None of those are on the watchlist.")
+        elif not rconfirm:
+            st.warning("Tick 'Yes, remove them' to confirm, then press the button again. Matches: " + ", ".join(matches))
+        else:
+            get_db().table("watchlist").delete().in_("style_sku", matches).execute()
+            flash("success", "Removed: " + ", ".join(matches))
+            st.rerun()
 
     enabled_count = int(wl["enabled"].sum()) if len(wl) else 0
     pending = int(wl["product_id"].isna().sum()) if len(wl) else 0
@@ -314,27 +475,34 @@ def render_watchlist(inv):
              + (f" · **{pending}** waiting for their product ID" if pending else ""))
 
     if wl.empty:
-        st.info("The watchlist is empty. Add a style above.")
+        st.info("The watchlist is empty. Paste a link above to add a product.")
         return
 
+    names = {}
+    for sku, name in zip(inv["style_sku"], inv["product_name"]):
+        names.setdefault(str(sku).lower(), name)
+
     view = wl.copy()
-    view["status"] = view["product_id"].apply(lambda v: "✅ ready" if pd.notna(v) else "⏳ ID found on next run")
+    view["product"] = [names.get(str(sku).lower(), "") for sku in view["style_sku"]]
+    view["status"] = view["product_id"].apply(lambda v: "✅ ready" if pd.notna(v) else "⏳ found on next run")
     view["remove"] = False
-    search = st.text_input("Filter the list", placeholder="Type to filter, e.g. 5026", label_visibility="collapsed")
+    search = st.text_input("Filter the list", placeholder="Type to filter, e.g. 5026 or maple", label_visibility="collapsed")
     if search.strip():
-        view = view[view["style_sku"].str.contains(search.strip(), case=False, na=False)]
-    view = view[["style_sku", "enabled", "status", "product_id", "remove"]]
+        q = search.strip()
+        view = view[view["style_sku"].str.contains(q, case=False, na=False) | view["product"].str.contains(q, case=False, na=False)]
+    view = view[["style_sku", "product", "enabled", "status", "url", "remove"]]
 
     edited = st.data_editor(
         view,
         key="watchlist_editor",
         hide_index=True,
-        disabled=["style_sku", "status", "product_id"],
+        disabled=["style_sku", "product", "status", "url"],
         column_config={
             "style_sku": st.column_config.TextColumn("Style"),
+            "product": st.column_config.TextColumn("Product"),
             "enabled": st.column_config.CheckboxColumn("Monitor", help="Untick to pause this style without deleting it"),
-            "status": st.column_config.TextColumn("Product ID status"),
-            "product_id": st.column_config.NumberColumn("Product ID"),
+            "status": st.column_config.TextColumn("Status"),
+            "url": st.column_config.LinkColumn("Link", display_text="Open ↗"),
             "remove": st.column_config.CheckboxColumn("Remove", help="Tick, then confirm and press Save"),
         },
     )
@@ -372,8 +540,8 @@ def render_watchlist(inv):
             st.rerun()
 
     with st.expander("🧹 Clean up old stock rows"):
-        watched = {s.lower() for s in wl.loc[wl["enabled"], "style_sku"]}
-        stale = sorted(s for s in inv["style_sku"].dropna().unique() if s.lower() not in watched)
+        watched = {s_.lower() for s_ in wl.loc[wl["enabled"], "style_sku"]}
+        stale = sorted(s_ for s_ in inv["style_sku"].dropna().unique() if s_.lower() not in watched)
         stale_rows = int(inv["style_sku"].isin(stale).sum())
         if not stale:
             st.write("Nothing to clean up - every stock row belongs to a monitored style.")
@@ -449,8 +617,9 @@ def render_stock(inv, threshold):
         df = df[df["product_name"].str.contains(q, case=False, na=False) | df["variant_id"].str.contains(q, case=False, na=False)]
 
     st.caption(f"{len(df):,} variants shown")
-    table = df[["variant_id", "product_name", "colour_name", "size_name", "stock_count"]].rename(columns={
-        "variant_id": "SKU", "product_name": "Product", "colour_name": "Colour", "size_name": "Size", "stock_count": "Stock",
+    table = df[["variant_id", "product_name", "colour_name", "size_name", "stock_count", "status", "eta"]].rename(columns={
+        "variant_id": "SKU", "product_name": "Product", "colour_name": "Colour", "size_name": "Size",
+        "stock_count": "Stock", "status": "Status", "eta": "ETA",
     })
     st.dataframe(table, hide_index=True)
     st.download_button("⬇️ Download as CSV", table.to_csv(index=False).encode("utf-8"), "stock.csv", "text/csv")
@@ -488,7 +657,7 @@ def main():
     show_flash()
     tab_dash, tab_watch, tab_sched, tab_stock = st.tabs(["📊 Dashboard", "📋 Watchlist", "⏰ Schedule & alerts", "📦 Stock browser"])
     with tab_dash:
-        render_dashboard(settings, inv)
+        render_dashboard(settings, inv, load_watchlist())
     with tab_watch:
         render_watchlist(inv)
     with tab_sched:
