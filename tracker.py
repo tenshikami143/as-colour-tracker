@@ -224,12 +224,15 @@ SIZE_MAP = {
 FAILED = False
 
 
-def post_discord(content):
-    """Returns True if Discord accepted the message."""
+def post_discord(content, suppress_embeds=False):
+    """Returns True if Discord accepted the message. suppress_embeds hides the big link preview cards."""
     if not DISCORD_WEBHOOK_URL:
         return False
+    payload = {"content": content}
+    if suppress_embeds:
+        payload["flags"] = 4  # SUPPRESS_EMBEDS
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=30)
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
         return response.status_code < 300
     except Exception as e:
         print(f"Discord post failed: {e}")
@@ -801,44 +804,39 @@ def previous_status_label(prev_data):
     return "Low" if stock < LOW_STOCK_THRESHOLD else "In stock"
 
 
-def low_line(ev):
-    status = ev["new_status"]
-    if status == "No stock data":
-        stock = "**no stock data**"
-    elif status == "Out of stock":
-        stock = "**0** (out of stock)"
-    else:
-        stock = f"**{ev['new_stock']}** left"
-    line = f"• {ev['colour_name']} / {ev['size_name']} — {stock}"
-    if ev.get("previous_stock") is not None:
-        line += f" · was {ev['previous_stock']}"
-    if ev.get("eta"):
-        line += f" · {ev['eta']}"
-    return line
+def inventory_text(ev):
+    return "no data" if ev["new_status"] == "No stock data" else str(ev["new_stock"])
 
 
-def restock_line(ev):
-    line = f"• {ev['colour_name']} / {ev['size_name']} — now **{ev['new_stock']}**"
-    if ev.get("previous_stock") is not None:
-        line += f" · was {ev['previous_stock']}"
-        previous = (ev.get("previous_status") or "").lower()
-        if previous and previous != "in stock":
-            line += f" ({previous})"
-    return line
+def line_for(ev):
+    return f"• {ev['colour_name']} / {ev['size_name']} — **{inventory_text(ev)}**"
 
 
-def product_blocks(events, line_fn, max_lines=10):
-    """Group events by product so each product is one block: a bold name + link, then one line per colour/size."""
+def product_title(ev):
+    """'Classic Tee | 5026' -> '**Classic Tee** · SKU 5026'"""
+    name = (ev.get("product_name") or "").strip()
+    if " | " in name:
+        base, code = name.rsplit(" | ", 1)
+        return f"**{base.strip()}** · SKU {code.strip()}"
+    return f"**{name or ev['style_sku']}** · SKU {str(ev['style_sku']).upper()}"
+
+
+def product_blocks(events, max_lines=10):
+    """One block per product: name + SKU, one line per colour / size, then a single link at the end."""
     groups = {}
     for ev in events:
-        key = (ev.get("product_name") or ev["style_sku"], ev.get("product_url"))
+        key = (product_title(ev), ev.get("product_url"))
         groups.setdefault(key, []).append(ev)
     blocks = []
-    for (name, url), evs in sorted(groups.items(), key=lambda kv: (kv[0][0] or "").lower()):
+    for (title, url), evs in sorted(groups.items(), key=lambda kv: kv[0][0].lower()):
         evs.sort(key=lambda e: (e.get("colour_name") or "", e.get("size_name") or ""))
-        for i in range(0, len(evs), max_lines):
-            head = f"**{name}**" + (f" <{url}>" if url else "") + (" (continued)" if i else "")
-            blocks.append(head + "\n" + "\n".join(line_fn(e) for e in evs[i:i + max_lines]))
+        pieces = [evs[i:i + max_lines] for i in range(0, len(evs), max_lines)]
+        for index, piece in enumerate(pieces):
+            head = title + (" (continued)" if index else "")
+            text = head + "\n" + "\n".join(line_for(e) for e in piece)
+            if url and index == len(pieces) - 1:
+                text += f"\n🔗 [Open product page]({url})"
+            blocks.append(text)
     return blocks
 
 
@@ -863,16 +861,10 @@ def build_report(low_events, restock_events):
     threshold = LOW_STOCK_THRESHOLD
     sections = []
     if low_events:
-        sections.append((f"🔻 **FELL BELOW {threshold}** — take these off the website ({len(low_events)})",
-                         product_blocks(low_events, low_line)))
+        sections.append((f"🔻 **FELL BELOW {threshold}** ({len(low_events)})", product_blocks(low_events)))
     if restock_events:
-        sections.append((f"🔺 **RESTOCKED TO {threshold}+** — put these back on the website ({len(restock_events)})",
-                         product_blocks(restock_events, restock_line)))
+        sections.append((f"🔺 **RESTOCKED TO {threshold}+** ({len(restock_events)})", product_blocks(restock_events)))
     messages = chunk_report(sections)
-    stamp = datetime.now(RUN_TZ).strftime("%a %d %b")
-    intro = (f"📅 **Stock report — {stamp}:** {len(low_events)} fell below {threshold}, "
-             f"{len(restock_events)} restocked to {threshold}+ (changes since the last run).")
-    messages[0] = intro + "\n\n" + messages[0]
     if len(messages) > MAX_REPORT_MESSAGES:
         hidden = len(messages) - MAX_REPORT_MESSAGES
         messages = messages[:MAX_REPORT_MESSAGES] + [f"…and {hidden} more message(s) of changes. Open the admin app to see the full list."]
@@ -1016,7 +1008,7 @@ def sync_inventory_and_alert():
     if DISCORD_WEBHOOK_URL:
         if all_events:
             for message in build_report(low_events, restock_events):
-                post_discord(message)
+                post_discord(message, suppress_embeds=True)
                 time.sleep(0.6)  # stay well inside Discord's rate limit
             print(f"Sent the stock report: {len(low_events)} fell below, {len(restock_events)} restocked.")
         elif SEND_ALL_CLEAR:
