@@ -94,19 +94,39 @@ def parse_entry(text):
             "url": f"https://www.ascolour.com.au/{slug}/", "has_code": bool(match)}
 
 
-def parse_entries(text):
-    """Split a pasted block (one link per line, or separated by spaces/commas) into entries, without repeats."""
-    entries, seen = [], set()
+def parse_entries_with_repeats(text):
+    """Split a pasted block into entries. Also returns the items that were pasted more than once."""
+    entries, repeats, seen = [], [], set()
     for piece in re.split(r"[\s,;]+", (text or "").strip()):
         entry = parse_entry(piece)
         if not entry:
             continue
         key = entry.get("style") or entry["input"]
         if key in seen:
+            repeats.append(entry["input"])
             continue
         seen.add(key)
         entries.append(entry)
-    return entries
+    return entries, repeats
+
+
+def parse_entries(text):
+    return parse_entries_with_repeats(text)[0]
+
+
+def norm_slug(name):
+    """'Men's Organic Rib Singlet' -> 'mens-organic-rib-singlet' (how AS Colour writes it in a link)."""
+    text = re.sub(r"['’`\"]", "", str(name or "").lower())
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def split_name(product_name, style_sku):
+    """'Classic Tee | 5026' -> ('Classic Tee', '5026')"""
+    name = (product_name or "").strip()
+    if " | " in name:
+        base, code = name.rsplit(" | ", 1)
+        return base.strip(), code.strip()
+    return name or str(style_sku), str(style_sku).upper()
 
 
 def slug_of(url):
@@ -410,38 +430,62 @@ def render_watchlist(inv):
 
     wl = load_watchlist()
 
+    names = {}   # style code (lower-case) -> product name, taken from the stock data
+    for sku, name in zip(inv["style_sku"], inv["product_name"]):
+        names.setdefault(str(sku).lower(), name)
+
     with st.form("add_styles", clear_on_submit=True):
         text = st.text_area("➕ Add products: paste one AS Colour link per line",
                             placeholder="https://www.ascolour.com.au/classic-tee-5026/\nhttps://www.ascolour.com.au/staple-tee-5001/", height=110)
         add_clicked = st.form_submit_button("Add to watchlist")
 
     if add_clicked:
-        entries = parse_entries(text)
-        existing = {s_.lower() for s_ in wl["style_sku"]}
-        existing_slugs = {slug_of(u) for u in wl["url"] if u}
+        entries, repeats = parse_entries_with_repeats(text)
+        status_of = {str(sku).lower(): bool(on) for sku, on in zip(wl["style_sku"], wl["enabled"])}   # style -> monitored?
+        style_by_slug = {slug_of(u): str(sku).lower() for sku, u in zip(wl["style_sku"], wl["url"]) if u}
+        style_by_name = {norm_slug(split_name(n, k)[0]): k for k, n in names.items() if k in status_of}
+
+        def describe(style):
+            if style in names:
+                base, code = split_name(names[style], style)
+                label = f"**{base}** (SKU {code})"
+            else:
+                label = f"SKU {style.upper()}"
+            return label + ("" if status_of.get(style, True) else " - currently paused: tick **Monitor** in the table below to resume it")
+
         new_rows, dupes, bad = [], [], [e for e in entries if not e["ok"]]
         for e in [e for e in entries if e["ok"]]:
-            if e["style"] in existing or (e["slug"] and e["slug"] in existing_slugs):
-                dupes.append(e["input"])
+            match = None
+            if e["style"] in status_of:
+                match = e["style"]
+            elif e["slug"] and e["slug"] in style_by_slug:
+                match = style_by_slug[e["slug"]]
+            elif e["slug"] and not e["has_code"] and e["slug"] in style_by_name:
+                match = style_by_name[e["slug"]]
+            if match:
+                dupes.append(match)
             else:
                 row = {"style_sku": e["style"], "enabled": True}
                 if e["url"]:
                     row["url"] = e["url"]
                 new_rows.append(row)
+
         for e in bad:
             st.error(f"Couldn't use `{e['input']}`: {e['why']}.")
         if dupes:
-            st.info("Already on the watchlist: " + ", ".join(dupes))
+            st.warning("⚠️ **Already on the watchlist - not added again:**\n\n" + "\n".join(f"- {describe(d)}" for d in dict.fromkeys(dupes)))
+        if repeats:
+            st.warning("⚠️ You pasted these more than once (counted once): " + ", ".join(repeats))
         if new_rows:
             try:
                 get_db().table("watchlist").upsert(new_rows).execute()
             except Exception:  # no url column yet: save the style codes only
                 get_db().table("watchlist").upsert([{k: v for k, v in r.items() if k != "url"} for r in new_rows]).execute()
                 st.warning("Saved, but links can't be stored yet. Run `update_setup.sql` in the Supabase SQL editor.")
-            names = ", ".join(r["style_sku"] for r in new_rows)
-            st.success(f"Added {len(new_rows)}: {names}. They'll be picked up on the next run.")
+            added = ", ".join(r["style_sku"] for r in new_rows)
+            st.success(f"Added {len(new_rows)}: {added}. They'll be picked up on the next run.")
             wl = load_watchlist()
-        elif not bad and not dupes:
+        elif not bad and not dupes and not repeats:
             st.warning("Paste at least one link first.")
 
     with st.form("remove_styles", clear_on_submit=True):
@@ -477,10 +521,6 @@ def render_watchlist(inv):
     if wl.empty:
         st.info("The watchlist is empty. Paste a link above to add a product.")
         return
-
-    names = {}
-    for sku, name in zip(inv["style_sku"], inv["product_name"]):
-        names.setdefault(str(sku).lower(), name)
 
     view = wl.copy()
     view["product"] = [names.get(str(sku).lower(), "") for sku in view["style_sku"]]
