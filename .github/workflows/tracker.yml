@@ -4,7 +4,7 @@ on:
   schedule:
     # Wakes up every hour. The script checks the schedule you set in the admin app
     # and only does the real work once a day, at the first check after your chosen time.
-    - cron: '0 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:      # "Run workflow" button here, or "Run now" in the admin app
 
 concurrency:
